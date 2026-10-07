@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,6 +36,19 @@ const (
 )
 
 func main() {
+	// `server -healthcheck` asks a running server on this machine whether
+	// it's healthy and exits 0/1. Docker runs it as the container's
+	// healthcheck (H-HC-2).
+	healthcheck := flag.Bool("healthcheck", false, "probe the local server's /healthz and exit 0 (healthy) or 1")
+	flag.Parse()
+	if *healthcheck {
+		if err := server.ProbeHealth(server.LocalURL(os.Getenv("HTTP_ADDR"))); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// JSON logs are easy for machines (log collectors, grep + jq) to parse.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger) // packages calling slog.Error etc. use it too
