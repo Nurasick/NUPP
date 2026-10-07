@@ -67,7 +67,7 @@ func (l *Local) Put(_ context.Context, key string, r io.Reader) error {
 	defer os.Remove(tmp.Name())
 
 	if _, err := io.Copy(tmp, r); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the copy error is the one worth reporting
 		return fmt.Errorf("write object: %w", err)
 	}
 	// Close can report write errors that were buffered, so check it.
@@ -86,7 +86,7 @@ func (l *Local) Open(_ context.Context, key string) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p)
+	f, err := os.Open(p) // #nosec G304 -- p comes from l.path, which rejects keys escaping root
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, key)
 	}

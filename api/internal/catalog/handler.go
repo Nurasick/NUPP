@@ -76,8 +76,8 @@ func (h *Handler) listCourses(w http.ResponseWriter, r *http.Request) {
 		Query: pattern,
 		// The conversions to int32 are safe because ParsePage caps limit at
 		// httpx.MaxLimit and offset at httpx.MaxOffset, far below int32's max.
-		RowLimit:  int32(page.Limit),
-		RowOffset: int32(page.Offset),
+		RowLimit:  int32(page.Limit),  // #nosec G115 -- bounded by httpx.MaxLimit
+		RowOffset: int32(page.Offset), // #nosec G115 -- bounded by httpx.MaxOffset
 	})
 	if err != nil {
 		httpx.Internal(w, r, fmt.Errorf("search courses: %w", err))
