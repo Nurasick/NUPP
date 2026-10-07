@@ -17,6 +17,10 @@ import (
 // Compiling the regexp once at package level avoids recompiling it per call.
 var nonSlugChars = regexp.MustCompile(`[^a-z0-9]+`)
 
+// validSlug matches exactly the slugs the database accepts (same pattern as
+// the courses.slug CHECK constraint in the migration).
+var validSlug = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
 // Slugify turns text like "CSCI 151" into a URL-safe slug like "csci-151":
 // lower-case ASCII letters and digits separated by single hyphens.
 //

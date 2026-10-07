@@ -58,6 +58,13 @@ func (h *Handler) listCourses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	// A URL can carry any bytes (%FF, %00). PostgreSQL text must be valid
+	// UTF-8 without NUL bytes and would reject them with an error, turning a
+	// bad request into a 500. Reject them here instead.
+	if !utf8.ValidString(search) || strings.ContainsRune(search, 0) {
+		httpx.BadRequest(w, "q contains invalid characters")
+		return
+	}
 	// Count characters (runes), not bytes: "қ" is one character but two bytes.
 	if utf8.RuneCountInString(search) > maxSearchLen {
 		httpx.BadRequest(w, fmt.Sprintf("q must be at most %d characters", maxSearchLen))
@@ -67,8 +74,8 @@ func (h *Handler) listCourses(w http.ResponseWriter, r *http.Request) {
 
 	courses, err := h.q.SearchCourses(r.Context(), catalogdb.SearchCoursesParams{
 		Query: pattern,
-		// The conversions to int32 are safe: ParsePage caps both values far
-		// below int32's maximum.
+		// The conversions to int32 are safe because ParsePage caps limit at
+		// httpx.MaxLimit and offset at httpx.MaxOffset, far below int32's max.
 		RowLimit:  int32(page.Limit),
 		RowOffset: int32(page.Offset),
 	})
@@ -94,6 +101,13 @@ func (h *Handler) getCourse(w http.ResponseWriter, r *http.Request) {
 	// Slugs are stored lower-case (a DB CHECK enforces it), so lower-casing
 	// the input makes the lookup case-insensitive (R-EP-6).
 	slug := strings.ToLower(r.PathValue("slug"))
+	// Anything that isn't shaped like a slug can't exist, so answer 404
+	// without asking the database (which would also reject NUL bytes with an
+	// error rather than "no rows").
+	if !validSlug.MatchString(slug) {
+		httpx.NotFound(w, "course")
+		return
+	}
 	course, err := h.q.GetCourseBySlug(r.Context(), slug)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.NotFound(w, "course")

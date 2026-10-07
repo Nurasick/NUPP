@@ -24,16 +24,27 @@ func withMiddleware(logger *slog.Logger, h http.Handler) http.Handler {
 	return logRequests(logger, recoverPanics(logger, securityHeaders(h)))
 }
 
-// statusRecorder wraps a ResponseWriter to remember the status code, which
-// net/http doesn't expose after the fact.
+// statusRecorder wraps a ResponseWriter to remember the status code and
+// whether the response has started, which net/http doesn't expose.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status  int
+	started bool // true once the status line has been sent to the client
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
+	if !s.started { // only the first call takes effect, as in net/http
+		s.status = code
+		s.started = true
+	}
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Write marks the response as started: the first Write implicitly sends a
+// 200 status line if WriteHeader wasn't called.
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	s.started = true
+	return s.ResponseWriter.Write(b)
 }
 
 // Unwrap lets http.ResponseController reach the original writer (for
@@ -48,6 +59,7 @@ func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter 
 // disk to the network socket; hiding it would make every file download copy
 // through a user-space buffer instead.
 func (s *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
+	s.started = true
 	if rf, ok := s.ResponseWriter.(io.ReaderFrom); ok {
 		return rf.ReadFrom(src)
 	}
@@ -55,38 +67,57 @@ func (s *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
 }
 
 // logRequests writes one structured log line per request.
+//
+// The line is written from a defer so that it also appears when the request
+// ends in a panic that propagates (an aborted response, see recoverPanics);
+// the panic is then re-raised unchanged (R-OPS-2).
 func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		// Default 200: a handler that writes a body without calling
 		// WriteHeader implicitly sends 200.
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		defer func() {
+			v := recover()
+			logger.InfoContext(r.Context(), "request",
+				"method", r.Method,
+				// Path only: query strings may contain search text or, in
+				// later plans, tokens that don't belong in logs.
+				"path", r.URL.Path,
+				"status", rec.status,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"aborted", v != nil,
+			)
+			if v != nil {
+				panic(v)
+			}
+		}()
 		next.ServeHTTP(rec, r)
-		logger.InfoContext(r.Context(), "request",
-			"method", r.Method,
-			// Path only: query strings may contain search text or, in later
-			// plans, tokens that don't belong in logs.
-			"path", r.URL.Path,
-			"status", rec.status,
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
 	})
 }
+
+// responseSpecificHeaders are set by handlers for one particular successful
+// response (see catalog/files.go) and must not leak onto an error response:
+// a cacheable 500 with a file's ETag would poison caches.
+var responseSpecificHeaders = []string{"ETag", "Cache-Control", "Content-Disposition", "Content-Security-Policy"}
 
 // recoverPanics turns a panic in a handler into a 500 response instead of a
 // dropped connection, and logs it with a stack trace (R-OPS-3).
 //
-// (net/http would also recover and keep the server alive, but it would log
-// plain text to stderr and send the client no response at all.)
+// If the handler had already started sending its response (e.g. half of a
+// file), a clean 500 is impossible: the status line is gone and appending
+// JSON would corrupt the body. Then we abort the connection instead, so the
+// client sees a failed download rather than a "successful" broken file.
 func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
 			v := recover()
 			if v == nil {
 				return
 			}
 			// http.ErrAbortHandler is net/http's deliberate "abort this
-			// response" signal, not a bug; let net/http handle it.
+			// response" signal, not a bug; pass it on untouched.
 			if v == http.ErrAbortHandler {
 				panic(v)
 			}
@@ -94,11 +125,18 @@ func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 				"value", v,
 				"method", r.Method,
 				"path", r.URL.Path,
+				"response_started", rec.started,
 				"stack", string(debug.Stack()),
 			)
+			if rec.started {
+				panic(http.ErrAbortHandler)
+			}
+			for _, name := range responseSpecificHeaders {
+				w.Header().Del(name)
+			}
 			httpx.Fail(w, http.StatusInternalServerError, httpx.CodeInternal, "something went wrong")
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(rec, r)
 	})
 }
 

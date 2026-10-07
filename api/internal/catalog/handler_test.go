@@ -129,6 +129,8 @@ func TestListCourses_RejectsBadInput(t *testing.T) {
 		"limit=abc", "limit=-1", "limit=0", "limit=99999999999999999999",
 		"offset=-1", "offset=100001",
 		"q=" + strings.Repeat("a", 101),
+		"q=%FF",   // invalid UTF-8: PostgreSQL would reject it (SQLSTATE 22021)
+		"q=a%00b", // NUL byte: not allowed in PostgreSQL text
 	} {
 		t.Run(qs[:min(len(qs), 20)], func(t *testing.T) {
 			assertError(t, get(t, mux, "/api/v1/courses?"+qs), http.StatusBadRequest, httpx.CodeBadRequest)
@@ -199,5 +201,9 @@ func TestGetCourse_ReturnsNestedOfferings(t *testing.T) {
 func TestGetCourse_UnknownSlugIs404(t *testing.T) {
 	testutil.Reset(t, testPool)
 	mux, _ := newMux(t)
-	assertError(t, get(t, mux, "/api/v1/courses/nope-999"), http.StatusNotFound, httpx.CodeNotFound)
+	for _, slug := range []string{"nope-999", "a%00b", "%FF", "has%20space"} {
+		t.Run(slug, func(t *testing.T) {
+			assertError(t, get(t, mux, "/api/v1/courses/"+slug), http.StatusNotFound, httpx.CodeNotFound)
+		})
+	}
 }

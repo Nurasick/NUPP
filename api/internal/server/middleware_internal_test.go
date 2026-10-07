@@ -104,3 +104,70 @@ func TestStatusRecorder_PreservesReaderFrom(t *testing.T) {
 		t.Fatalf("body = %q", inner.Body.String())
 	}
 }
+
+// Review fix: a panic after the response has started must abort the
+// connection (so the client sees a broken download, not a "200" with JSON
+// glued onto half a file), and the request must still be logged once.
+func TestPanicAfterResponseStartedAbortsAndIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	h := withMiddleware(slog.New(slog.NewJSONHandler(&buf, nil)), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("partial file"))
+		panic("disk read failed")
+	}))
+	rec := httptest.NewRecorder()
+
+	aborted := func() (v any) {
+		defer func() { v = recover() }()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/files/x", nil))
+		return nil
+	}()
+
+	if aborted != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", aborted)
+	}
+	if strings.Contains(rec.Body.String(), `"error"`) {
+		t.Errorf("JSON error appended to a started response: %q", rec.Body.String())
+	}
+	var requests, panics int
+	for _, l := range logLines(t, &buf) {
+		switch l["msg"] {
+		case "request":
+			requests++
+			if l["aborted"] != true {
+				t.Errorf("aborted request not marked as such: %v", l)
+			}
+		case "panic":
+			panics++
+		}
+	}
+	if requests != 1 || panics != 1 {
+		t.Errorf("got %d request logs and %d panic logs, want 1 and 1", requests, panics)
+	}
+}
+
+// Review fix: if a handler set file headers and then panicked before writing,
+// the 500 must not carry them (no caching an error as if it were the file).
+func TestPanicBeforeWriteDropsResponseSpecificHeaders(t *testing.T) {
+	h := withMiddleware(slog.New(slog.DiscardHandler), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hdr := w.Header()
+		hdr.Set("ETag", `"abc"`)
+		hdr.Set("Cache-Control", "public, max-age=3600")
+		hdr.Set("Content-Disposition", `inline; filename="x.pdf"`)
+		hdr.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		panic("boom")
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	for _, name := range []string{"ETag", "Cache-Control", "Content-Disposition", "Content-Security-Policy"} {
+		if v := rec.Header().Get(name); v != "" {
+			t.Errorf("500 response still carries %s: %q", name, v)
+		}
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("security headers must survive")
+	}
+}
