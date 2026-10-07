@@ -1,0 +1,346 @@
+# NUPP API contract (spec: docs/superpowers/specs/2026-10-07-plan-1-catalog-api-spec.md).
+#
+# This file is the source of truth for the API's shape:
+#   * internal/server/contract_test.go fails if real responses don't match it;
+#   * the web app (Plan 2) generates its TypeScript client from it.
+# Change a response shape here in the same commit as the Go code.
+openapi: 3.0.3
+info:
+  title: NUPP API
+  version: 0.1.0
+  description: |
+    Public, read-only catalog of approved university learning materials.
+
+    Every JSON response is an envelope `{data, error}` (plus `meta` on paginated
+    lists). Successful file downloads are raw bytes; `416` is plain text.
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness and database connectivity check
+      responses:
+        "200":
+          description: Service and database are up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /api/v1/courses:
+    get:
+      operationId: listCourses
+      summary: Search courses by code or title
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring of the code or title, matched literally. Trimmed; at most 100 characters.
+          schema: { type: string, maxLength: 100 }
+        - name: limit
+          in: query
+          description: Page size. Values above 100 are clamped to 100.
+          schema: { type: integer, minimum: 1, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+      responses:
+        "200":
+          description: Matching courses ordered by code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CourseListResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+
+  /api/v1/courses/{slug}:
+    get:
+      operationId: getCourse
+      summary: Course page with offerings and their assessments
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Course slug, case-insensitive (e.g. csci-151).
+          schema: { type: string }
+      responses:
+        "200":
+          description: Course with offerings (newest first) and their assessments.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CourseDetailResponse" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+
+  /api/v1/offerings/{id}/materials:
+    get:
+      operationId: listOfferingMaterials
+      summary: Visible materials of an offering
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: Materials, general ones first, then in assessment order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MaterialListResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+
+  /api/v1/materials/{id}:
+    get:
+      operationId: getMaterial
+      summary: Material page with its context and files
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: Material with course, offering, assessment and files in page order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MaterialDetailResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+
+  /api/v1/files/{id}:
+    get:
+      operationId: getFile
+      summary: Download a material file
+      description: |
+        Raw file bytes with `Content-Type` set to the stored type. PDFs and
+        images are `inline`, other types `attachment`. Supports `Range`,
+        `If-None-Match` and `If-Range` (ETag = SHA-256 of the content).
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: The whole file.
+          headers:
+            ETag: { schema: { type: string }, description: Quoted lower-case hex SHA-256 }
+            Content-Disposition: { schema: { type: string } }
+          content:
+            application/pdf: { schema: { $ref: "#/components/schemas/Binary" } }
+            image/png: { schema: { $ref: "#/components/schemas/Binary" } }
+            image/jpeg: { schema: { $ref: "#/components/schemas/Binary" } }
+            application/msword: { schema: { $ref: "#/components/schemas/Binary" } }
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document: { schema: { $ref: "#/components/schemas/Binary" } }
+            application/vnd.openxmlformats-officedocument.presentationml.presentation: { schema: { $ref: "#/components/schemas/Binary" } }
+        "206": { description: The requested byte range. }
+        "304": { description: Not modified (the client's ETag matches). }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "416":
+          description: Range not satisfiable (plain text, produced by Go's http.ServeContent).
+          content:
+            text/plain: { schema: { type: string } }
+        "500": { $ref: "#/components/responses/Error" }
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: Canonical lower-case UUID. Other spellings are rejected with 400.
+      schema: { type: string, format: uuid }
+
+  responses:
+    Error:
+      description: Error envelope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  schemas:
+    Binary: { type: string, format: binary }
+
+    # "null, or an empty object". Used for fields that are always null in a
+    # given envelope; maxProperties 0 rejects any real object.
+    AlwaysNull:
+      type: object
+      nullable: true
+      maxProperties: 0
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [bad_request, not_found, method_not_allowed, internal, unavailable]
+        message: { type: string, description: "Human-readable, safe to show to users." }
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [data, error]
+      properties:
+        data: { $ref: "#/components/schemas/AlwaysNull" }
+        error: { $ref: "#/components/schemas/Error" }
+
+    Meta:
+      type: object
+      additionalProperties: false
+      required: [total, limit, offset]
+      properties:
+        total: { type: integer, format: int64, description: Matches across all pages. }
+        limit: { type: integer, description: Page size actually applied. }
+        offset: { type: integer }
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [data, error]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status: { type: string, enum: [ok] }
+        error: { $ref: "#/components/schemas/AlwaysNull" }
+
+    CourseSummary:
+      type: object
+      required: [id, code, slug, title, department]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, example: CSCI 151 }
+        slug: { type: string, example: csci-151 }
+        title: { type: string, example: Programming for Scientists and Engineers }
+        department: { type: string, nullable: true }
+
+    AssessmentView:
+      type: object
+      additionalProperties: false
+      required: [id, kind, number, label]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [midterm, quiz, final, assignment, lab, other] }
+        number: { type: integer, nullable: true, example: 1 }
+        label: { type: string, nullable: true }
+
+    OfferingView:
+      type: object
+      additionalProperties: false
+      required: [id, year, term, instructor, assessments]
+      properties:
+        id: { type: string, format: uuid }
+        year: { type: integer, example: 2025 }
+        term: { type: string, enum: [spring, summer, fall] }
+        instructor: { type: string, nullable: true }
+        assessments:
+          type: array
+          items: { $ref: "#/components/schemas/AssessmentView" }
+
+    # allOf merges schemas. additionalProperties: false can't be used on the
+    # parts of an allOf (each part would reject the other part's fields), so
+    # strictness for these lives on the envelopes instead.
+    CourseDetail:
+      allOf:
+        - $ref: "#/components/schemas/CourseSummary"
+        - type: object
+          required: [offerings]
+          properties:
+            offerings:
+              type: array
+              items: { $ref: "#/components/schemas/OfferingView" }
+
+    MaterialSummary:
+      type: object
+      required: [id, offering_id, assessment_id, title, type, description, published_at]
+      properties:
+        id: { type: string, format: uuid }
+        offering_id: { type: string, format: uuid }
+        assessment_id: { type: string, format: uuid, nullable: true, description: null for general materials }
+        title: { type: string, example: Midterm 1 questions }
+        type: { type: string, enum: [questions, solutions, notes, slides, cheatsheet, other] }
+        description: { type: string }
+        published_at: { type: string, format: date-time }
+
+    CourseRef:
+      type: object
+      additionalProperties: false
+      required: [id, code, slug, title]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        slug: { type: string }
+        title: { type: string }
+
+    OfferingRef:
+      type: object
+      additionalProperties: false
+      required: [id, year, term, instructor]
+      properties:
+        id: { type: string, format: uuid }
+        year: { type: integer }
+        term: { type: string, enum: [spring, summer, fall] }
+        instructor: { type: string, nullable: true }
+
+    FileView:
+      type: object
+      additionalProperties: false
+      required: [id, mime_type, size_bytes, position, url]
+      properties:
+        id: { type: string, format: uuid }
+        mime_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        position: { type: integer, description: "Page order, starting at 0." }
+        url: { type: string, example: /api/v1/files/6f1c2a43-8a8e-4b7c-9d0e-2f3a4b5c6d7e }
+
+    MaterialDetail:
+      allOf:
+        - $ref: "#/components/schemas/MaterialSummary"
+        - type: object
+          required: [course, offering, assessment, files]
+          properties:
+            course: { $ref: "#/components/schemas/CourseRef" }
+            offering: { $ref: "#/components/schemas/OfferingRef" }
+            assessment:
+              description: null for general materials
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/AssessmentView"
+            files:
+              type: array
+              items: { $ref: "#/components/schemas/FileView" }
+
+    CourseListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, error, meta]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/CourseSummary" }
+        error: { $ref: "#/components/schemas/AlwaysNull" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    CourseDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [data, error]
+      properties:
+        data: { $ref: "#/components/schemas/CourseDetail" }
+        error: { $ref: "#/components/schemas/AlwaysNull" }
+
+    MaterialListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, error]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/MaterialSummary" }
+        error: { $ref: "#/components/schemas/AlwaysNull" }
+
+    MaterialDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [data, error]
+      properties:
+        data: { $ref: "#/components/schemas/MaterialDetail" }
+        error: { $ref: "#/components/schemas/AlwaysNull" }
