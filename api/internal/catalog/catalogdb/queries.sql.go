@@ -318,6 +318,7 @@ const getVisibleMaterialFile = `-- name: GetVisibleMaterialFile :one
 SELECT f.id,
        f.storage_key,
        f.mime_type,
+       f.size_bytes,
        f.sha256,
        f.position,
        m.title AS material_title,
@@ -333,6 +334,7 @@ type GetVisibleMaterialFileRow struct {
 	ID            uuid.UUID
 	StorageKey    string
 	MimeType      string
+	SizeBytes     int64
 	Sha256        string
 	Position      int32
 	MaterialTitle string
@@ -348,6 +350,7 @@ func (q *Queries) GetVisibleMaterialFile(ctx context.Context, id uuid.UUID) (Get
 		&i.ID,
 		&i.StorageKey,
 		&i.MimeType,
+		&i.SizeBytes,
 		&i.Sha256,
 		&i.Position,
 		&i.MaterialTitle,

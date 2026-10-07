@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -238,4 +239,40 @@ func TestGetFile_RowWithoutStoredObjectIs404(t *testing.T) {
 	fx := testutil.SeedCatalog(t, testPool) // nothing written to storage
 	mux, _ := newMux(t)
 	assertError(t, get(t, mux, "/api/v1/files/"+fx.File.ID.String()), http.StatusNotFound, httpx.CodeNotFound)
+}
+
+// deadlineRecorder records write deadlines (the real ResponseWriter supports
+// them; httptest's recorder doesn't).
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.deadlines = append(d.deadlines, t)
+	return nil
+}
+
+// HAC-12 / H-HTTP-3: downloads get 30 s plus time for the file at 32 KiB/s.
+func TestGetFile_SetsSizeBasedWriteDeadline(t *testing.T) {
+	testutil.Reset(t, testPool)
+	fx := testutil.SeedCatalog(t, testPool)
+	// Pretend the file is 3.2 MiB so the size part is clearly visible: 100 s.
+	if _, err := testPool.Exec(context.Background(),
+		"UPDATE material_files SET size_bytes = $1 WHERE id = $2", 100*32*1024, fx.File.ID); err != nil {
+		t.Fatal(err)
+	}
+	mux, files := newMux(t)
+	putFixtureFile(t, files, fx)
+
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	start := time.Now()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/files/"+fx.File.ID.String(), nil))
+
+	if len(rec.deadlines) != 1 {
+		t.Fatalf("deadlines = %v, want exactly one", rec.deadlines)
+	}
+	if d := rec.deadlines[0].Sub(start); d < 129*time.Second || d > 131*time.Second {
+		t.Errorf("write deadline = now+%v, want ~130s (30s + 100s)", d)
+	}
 }

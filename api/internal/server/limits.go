@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Nurasick/NUPP/api/internal/clientip"
 	"github.com/Nurasick/NUPP/api/internal/httpx"
@@ -31,6 +32,9 @@ type stack struct {
 	resolver *clientip.Resolver // nil: use RemoteAddr only
 	limiter  *ratelimit.Limiter // nil: no rate limiting
 	caps     Caps
+
+	// apiWriteTimeout overrides apiWriteTimeout (tests use a short one).
+	apiWriteTimeout time.Duration
 }
 
 // requestClass decides which budget a request uses (H-RL-1).

@@ -25,6 +25,20 @@ var fileExtensions = map[string]string{
 	"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
 }
 
+// Download time budget (hardening spec H-HTTP-3): a fixed allowance plus the
+// time the file takes at a deliberately low minimum speed. Normal clients
+// never come close; a client trickling the download to hold the connection
+// open is cut off.
+const (
+	downloadBaseTime = 30 * time.Second
+	minDownloadSpeed = 32 << 10 // bytes per second (32 KiB/s)
+)
+
+// downloadDeadline is how long a client gets to download size bytes.
+func downloadDeadline(size int64) time.Duration {
+	return downloadBaseTime + time.Duration(size)*time.Second/minDownloadSpeed
+}
+
 // inlineTypes are shown in the browser; everything else is downloaded (R-EP-18).
 // Browsers render PDFs and images safely; Office files they can't render anyway.
 var inlineTypes = map[string]bool{
@@ -107,6 +121,8 @@ func (h *Handler) getFile(w http.ResponseWriter, r *http.Request) {
 	// Browsers may reuse the file for 1 hour, shared caches (Cloudflare) for
 	// 1 day. Not "immutable": a takedown must stop serving it (R-EP-18).
 	header.Set("Cache-Control", "public, max-age=3600, s-maxage=86400")
+
+	httpx.SetWriteDeadline(w, downloadDeadline(file.SizeBytes))
 
 	// ServeContent does the hard HTTP parts for us: Range requests (206),
 	// If-None-Match / If-Range against our ETag (304), HEAD, Content-Length.

@@ -68,16 +68,8 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	srv := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: server.New(server.Deps{Pool: pool, Files: files, Logger: logger}),
-		// Slow-loris protection: a client must send its headers within 5s.
-		ReadHeaderTimeout: 5 * time.Second,
-		// Close idle keep-alive connections after a minute.
-		IdleTimeout: 60 * time.Second,
-		// Deliberately no WriteTimeout: it would cut off large file
-		// downloads on slow connections (R-OPS-5).
-	}
+	// Timeouts and size limits live in server.NewHTTPServer (spec H-HTTP-1).
+	srv := server.NewHTTPServer(cfg.HTTPAddr, server.New(server.Deps{Pool: pool, Files: files, Logger: logger}))
 
 	// ListenAndServe blocks, so it runs in its own goroutine; its result
 	// comes back over a channel. Buffer size 1 means the goroutine can
@@ -95,14 +87,12 @@ func run(logger *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	// Graceful shutdown (R-OPS-6): stop accepting new connections and wait
-	// for in-flight requests. If they don't finish in time, Shutdown returns
-	// an error and we exit 1 so the supervisor sees an unclean stop.
+	// Graceful shutdown (R-OPS-6, H-OPS-1): stop accepting new connections
+	// and wait for in-flight requests. If they don't finish in time, they are
+	// cut off and we exit 1 so the supervisor sees an unclean stop.
 	logger.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("graceful shutdown: %w", err)
+	if err := server.Shutdown(srv, shutdownTimeout); err != nil {
+		return err
 	}
 	logger.Info("stopped cleanly")
 	return nil

@@ -16,15 +16,21 @@ import (
 
 // withMiddleware wraps h in all middleware, outermost first (spec 1.5 §15):
 //
-//	withClientIP → logRequests → recoverPanics → securityHeaders → rateLimit → inflight → h
+//	withClientIP → logRequests → recoverPanics → securityHeaders → rateLimit → inflight → deadlines → h
 //
+// Why this order:
 //   - the client IP is known before anything logs or limits;
 //   - logging sits outside recovery so even a panicking request is logged
 //     exactly once, with the status the client actually got (R-OPS-2);
 //   - security headers are set before the limiters, so 429/503 carry them;
 //   - per-client rate limiting runs before the shared caps, so one flooding
-//     client is stopped by its own budget before it uses shared capacity.
+//     client is stopped by its own budget before it uses shared capacity;
+//   - deadlines only wrap work that was actually admitted.
+//
+// Each line below wraps the previous handler, so the LAST one listed is the
+// OUTERMOST layer.
 func withMiddleware(s stack, h http.Handler) http.Handler {
+	h = deadlines(s.apiWriteTimeout, h)
 	h = inflight(s.caps, h)
 	h = rateLimit(s.limiter, h)
 	h = securityHeaders(h)

@@ -103,6 +103,7 @@ SELECT * FROM material_files WHERE material_id = $1 ORDER BY position;
 SELECT f.id,
        f.storage_key,
        f.mime_type,
+       f.size_bytes,
        f.sha256,
        f.position,
        m.title AS material_title,

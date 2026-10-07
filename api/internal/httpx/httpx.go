@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -153,4 +154,20 @@ func ParseUUID(raw string) (uuid.UUID, error) {
 		return uuid.Nil, errors.New("invalid id")
 	}
 	return id, nil
+}
+
+// SetWriteDeadline gives the response d from now to be written to the client;
+// a client reading slower than that is cut off (hardening spec H-HTTP-2/3).
+//
+// It works through middleware wrappers because http.ResponseController
+// follows their Unwrap methods down to the real connection. Writers that
+// don't support deadlines (e.g. httptest.ResponseRecorder) report
+// http.ErrNotSupported, which we ignore (H-HTTP-5).
+//
+// We deliberately do NOT clear the deadline when the handler returns: net/http
+// (Go 1.26) clears it itself after flushing the last buffered bytes of the
+// response (server.go, right after finishRequest). Clearing it earlier, from a
+// defer in the handler, would leave that final flush without a deadline (H-HTTP-4).
+func SetWriteDeadline(w http.ResponseWriter, d time.Duration) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d))
 }
