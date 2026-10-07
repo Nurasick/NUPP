@@ -1,0 +1,43 @@
+# Continuous integration for the Go API (spec R-DX-5).
+# Runs on every push to main and on every pull request.
+name: api
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Default all `run:` steps to the api/ folder.
+defaults:
+  run:
+    working-directory: api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod # same Go version as local development
+          cache-dependency-path: api/go.sum
+
+      - name: Formatting (gofmt)
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: Vet
+        run: go vet ./...
+
+      # testcontainers starts PostgreSQL in Docker, which GitHub's Ubuntu
+      # runners provide out of the box. -race detects data races.
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      # Fails if someone edited queries.sql or a migration without
+      # regenerating the Go code.
+      - name: sqlc output is up to date
+        run: docker run --rm -v "$PWD:/src" -w /src sqlc/sqlc:1.29.0 diff
+
+      - name: Docker image builds
+        run: docker build -t nupp-api .

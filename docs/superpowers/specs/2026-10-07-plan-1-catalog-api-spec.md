@@ -313,7 +313,13 @@ Automated unless marked *(manual)*.
 | Migrations on startup with advisory lock | Separate migrate step | Single instance; the lock makes server + seed safe |
 | Builtin `C.UTF-8` collation | OS locale (glibc/ICU) | Same Unicode case-folding on every machine; no collation drift on OS upgrades |
 
-## 13. Review Log
+## 13. Implementation Notes
+
+- Go toolchain floor is **1.26** (the current pgx, goose and testcontainers releases require it).
+- The dev database listens on host port **5433** (configurable via `POSTGRES_PORT`) so it never
+  clashes with a locally installed PostgreSQL on 5432.
+
+## 14. Review Log
 
 v1 was reviewed by an independent architecture reviewer (verdict REVISE, 18 findings). All were
 accepted except that `NoError` uses "null or an object with no properties" instead of `enum: [null]`,

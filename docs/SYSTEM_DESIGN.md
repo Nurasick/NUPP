@@ -42,7 +42,7 @@ disk — no backend-as-a-service.
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| API | **Go** (stdlib `net/http` routing, Go ≥ 1.24) | You already know Go; one small static binary; great at streaming uploads |
+| API | **Go** (stdlib `net/http` routing, Go ≥ 1.26) | You already know Go; one small static binary; great at streaming uploads |
 | DB access | **PostgreSQL 17** + **pgx** + **sqlc** | Write real SQL, get type-safe Go code generated |
 | Migrations | **goose** (embedded in the binary, run on startup) | Plain `.sql` files, versioned in git |
 | API contract | **OpenAPI 3** spec (`api/openapi/openapi.yaml`) | Source of truth; a contract test keeps Go honest; TypeScript client is generated from it |

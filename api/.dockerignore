@@ -1,0 +1,4 @@
+# Keep secrets, local data and tests out of the image build context.
+.env
+data/
+*_test.go

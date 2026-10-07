@@ -1,4 +1,6 @@
-# Local development stack. `docker compose up -d postgres` starts only the DB.
+# Local stack.
+#   docker compose up -d postgres   → just the database (for `go run`)
+#   docker compose up -d --build    → database + API in containers
 services:
   postgres:
     image: postgres:17-alpine
@@ -24,5 +26,20 @@ services:
       timeout: 3s
       retries: 10
 
+  api:
+    build: ./api
+    environment:
+      # Inside the compose network the DB is reachable by its service name.
+      DATABASE_URL: postgres://nupp:${POSTGRES_PASSWORD}@postgres:5432/nupp?sslmode=disable
+      APP_ENV: ${APP_ENV:-development}
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    volumes:
+      - files:/data/files
+    depends_on:
+      postgres:
+        condition: service_healthy # wait until pg_isready succeeds
+
 volumes:
   pgdata:
+  files:
