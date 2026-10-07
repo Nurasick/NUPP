@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +34,9 @@ const (
 	downloadBaseTime = 30 * time.Second
 	minDownloadSpeed = 32 << 10 // bytes per second (32 KiB/s)
 )
+
+// fileLookupTimeout bounds the database lookup of a download (H-DB-3).
+const fileLookupTimeout = 2 * time.Second
 
 // downloadDeadline is how long a client gets to download size bytes.
 func downloadDeadline(size int64) time.Duration {
@@ -76,13 +80,18 @@ func (h *Handler) getFile(w http.ResponseWriter, r *http.Request) {
 	// The query only returns files of visible materials, and only from
 	// material_files, whose keys always start with "materials/". A pending or
 	// hidden upload can therefore never be served here (R-EP-17).
-	file, err := h.q.GetVisibleMaterialFile(r.Context(), id)
+	// The lookup gets its own short deadline (H-DB-3): if the database is
+	// slow, download floods give up quickly instead of holding connections
+	// that JSON requests need. The streaming below isn't bound by it.
+	lookupCtx, cancel := context.WithTimeout(r.Context(), fileLookupTimeout)
+	file, err := h.q.GetVisibleMaterialFile(lookupCtx, id)
+	cancel()
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.NotFound(w, "file")
 		return
 	}
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("get material file: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("get material file: %w", err))
 		return
 	}
 

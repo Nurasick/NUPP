@@ -2,9 +2,11 @@ package db_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Nurasick/NUPP/api/internal/db"
@@ -173,4 +175,43 @@ func TestMaterialFiles_RejectUnsafeValues(t *testing.T) {
 	mustFail(t, "upper-case sha256", insert, material, "materials/x/1.pdf", "application/pdf",
 		"0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef")
 	exec(t, insert, material, "materials/x/1.pdf", "application/pdf", goodSHA)
+}
+
+// HAC-9 / H-DB-1: the serving pool has statement limits; the migration pool
+// (testPool, opened with plain Connect) does not.
+func TestConnectServing_AppliesStatementLimits(t *testing.T) {
+	ctx := context.Background()
+	serving, err := db.ConnectServing(ctx, testutil.DatabaseURL(), 3)
+	if err != nil {
+		t.Fatalf("ConnectServing: %v", err)
+	}
+	defer serving.Close()
+
+	var timeout, idleTx string
+	if err := serving.QueryRow(ctx, "SHOW statement_timeout").Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := serving.QueryRow(ctx, "SHOW idle_in_transaction_session_timeout").Scan(&idleTx); err != nil {
+		t.Fatal(err)
+	}
+	if timeout != "5s" || idleTx != "10s" {
+		t.Errorf("statement_timeout = %q, idle_in_transaction_session_timeout = %q; want 5s, 10s", timeout, idleTx)
+	}
+	if got := serving.Config().MaxConns; got != 3 {
+		t.Errorf("MaxConns = %d, want 3", got)
+	}
+
+	var pgErr *pgconn.PgError
+	_, err = serving.Exec(ctx, "SELECT pg_sleep(6)")
+	if !errors.As(err, &pgErr) || pgErr.Code != "57014" {
+		t.Errorf("pg_sleep(6) on the serving pool: err = %v, want SQLSTATE 57014", err)
+	}
+
+	var plain string
+	if err := testPool.QueryRow(ctx, "SHOW statement_timeout").Scan(&plain); err != nil {
+		t.Fatal(err)
+	}
+	if plain != "0" {
+		t.Errorf("migration pool statement_timeout = %q, want 0 (unlimited)", plain)
+	}
 }

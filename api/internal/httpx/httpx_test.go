@@ -1,10 +1,16 @@
 package httpx_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Nurasick/NUPP/api/internal/httpx"
 )
@@ -121,4 +127,38 @@ func TestOK_LeavesCachingToTheHandler(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != "" {
 		t.Errorf("Cache-Control = %q, want unset", got)
 	}
+}
+
+// HAC-10 / H-DB-4: database errors map to the right response.
+func TestDBError(t *testing.T) {
+	timeoutCases := map[string]error{
+		"context deadline":       fmt.Errorf("list courses: %w", context.DeadlineExceeded),
+		"query_canceled (57014)": fmt.Errorf("list courses: %w", &pgconn.PgError{Code: "57014"}),
+	}
+	for name, err := range timeoutCases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			httpx.DBError(rec, httptest.NewRequest(http.MethodGet, "/x", nil), err)
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" ||
+				!strings.Contains(rec.Body.String(), `"code":"timeout"`) {
+				t.Fatalf("status %d Retry-After %q body %s, want 503 timeout", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+			}
+		})
+	}
+
+	t.Run("client went away", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		httpx.DBError(rec, httptest.NewRequest(http.MethodGet, "/x", nil), fmt.Errorf("q: %w", context.Canceled))
+		if rec.Body.Len() != 0 || rec.Header().Get("Content-Type") != "" {
+			t.Fatalf("wrote a response to a client that is gone: %q", rec.Body.String())
+		}
+	})
+
+	t.Run("anything else", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		httpx.DBError(rec, httptest.NewRequest(http.MethodGet, "/x", nil), errors.New("connection refused"))
+		if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"code":"internal"`) {
+			t.Fatalf("status %d body %s, want 500 internal", rec.Code, rec.Body)
+		}
+	})
 }

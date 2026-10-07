@@ -12,6 +12,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -22,12 +23,53 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Connect opens a connection pool and verifies the database is reachable.
+// Limits for the serving pool (hardening spec H-DB-1, H-DB-2).
+const (
+	statementTimeout       = "5s"  // longest any single query may run
+	idleInTransactionLimit = "10s" // longest a transaction may sit idle
+)
+
+// Connect opens a connection pool with no query limits and verifies the
+// database is reachable. Use it for migrations and one-off tools such as
+// cmd/seed; the HTTP server serves requests from ConnectServing instead.
 //
 // pgxpool keeps several connections open and hands them out to concurrent
 // requests, which is much cheaper than connecting per request.
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, fmt.Errorf("parse database URL: %w", err)
+	}
+	return open(ctx, cfg)
+}
+
+// ConnectServing opens the pool that serves HTTP requests. Every connection
+// in it gets PostgreSQL-side limits, so a slow or stuck query is cancelled by
+// the database itself after 5 s, whatever the Go code does (H-DB-1):
+//
+//   - statement_timeout: any single statement is cancelled after 5 s
+//     (it then fails with SQLSTATE 57014, query_canceled);
+//   - idle_in_transaction_session_timeout: a connection that opened a
+//     transaction and then went quiet is closed after 10 s, so it can't
+//     hold locks forever.
+func ConnectServing(ctx context.Context, url string, maxConns int32) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, fmt.Errorf("parse database URL: %w", err)
+	}
+	// RuntimeParams are sent when each connection starts, like running
+	// "SET statement_timeout = '5s'" on every new connection.
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = statementTimeout
+	cfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = idleInTransactionLimit
+	cfg.MaxConns = maxConns
+	cfg.MinConns = 0
+	cfg.MaxConnIdleTime = 5 * time.Minute // close connections nobody has used for a while
+	cfg.MaxConnLifetime = time.Hour       // recycle connections now and then (frees server memory)
+	return open(ctx, cfg)
+}
+
+func open(ctx context.Context, cfg *pgxpool.Config) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}

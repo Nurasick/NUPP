@@ -7,6 +7,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Pagination limits (spec §4.4).
@@ -107,6 +109,39 @@ func NotFound(w http.ResponseWriter, what string) {
 func Internal(w http.ResponseWriter, r *http.Request, err error) {
 	slog.ErrorContext(r.Context(), "internal error", "err", err, "method", r.Method, "path", r.URL.Path)
 	Fail(w, http.StatusInternalServerError, CodeInternal, "something went wrong")
+}
+
+// DBError answers a request whose database work failed (hardening spec H-DB-4).
+//
+// Three cases, because they mean very different things:
+//   - the query ran out of time (our deadline, a pool that stayed busy, or
+//     PostgreSQL's statement_timeout): a temporary overload, so 503 and
+//     "try again in a second", logged as a warning;
+//   - the client disconnected and cancelled the request: nobody is
+//     listening, so write nothing and log quietly at info level;
+//   - anything else is a real bug or outage: 500, logged as an error.
+func DBError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case isTimeout(err):
+		slog.WarnContext(r.Context(), "database timeout", "err", err, "method", r.Method, "path", r.URL.Path)
+		w.Header().Set("Retry-After", "1")
+		Fail(w, http.StatusServiceUnavailable, CodeTimeout, "the request took too long, try again")
+	case errors.Is(err, context.Canceled):
+		slog.InfoContext(r.Context(), "request cancelled by client", "method", r.Method, "path", r.URL.Path)
+	default:
+		Internal(w, r, err)
+	}
+}
+
+// sqlstateQueryCanceled is what PostgreSQL reports when statement_timeout fires.
+const sqlstateQueryCanceled = "57014"
+
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled
 }
 
 // Page is a validated limit/offset pair.

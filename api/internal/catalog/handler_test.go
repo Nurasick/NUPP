@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Nurasick/NUPP/api/internal/catalog"
 	"github.com/Nurasick/NUPP/api/internal/catalog/catalogdb"
@@ -205,5 +206,26 @@ func TestGetCourse_UnknownSlugIs404(t *testing.T) {
 		t.Run(slug, func(t *testing.T) {
 			assertError(t, get(t, mux, "/api/v1/courses/"+slug), http.StatusNotFound, httpx.CodeNotFound)
 		})
+	}
+}
+
+// HAC-10: a request whose time ran out gets 503 timeout, not 500.
+func TestHandlers_TimeoutIs503(t *testing.T) {
+	testutil.Reset(t, testPool)
+	fx := testutil.SeedCatalog(t, testPool)
+	mux, _ := newMux(t)
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	for _, path := range []string{
+		"/api/v1/courses",
+		"/api/v1/courses/csci-151",
+		"/api/v1/offerings/" + fx.Offering.ID.String() + "/materials",
+		"/api/v1/materials/" + fx.Material.ID.String(),
+		"/api/v1/files/" + fx.File.ID.String(),
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil).WithContext(expired))
+		assertError(t, rec, http.StatusServiceUnavailable, httpx.CodeTimeout)
 	}
 }

@@ -80,12 +80,12 @@ func (h *Handler) listCourses(w http.ResponseWriter, r *http.Request) {
 		RowOffset: int32(page.Offset), // #nosec G115 -- bounded by httpx.MaxOffset
 	})
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("search courses: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("search courses: %w", err))
 		return
 	}
 	total, err := h.q.CountCourses(r.Context(), pattern)
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("count courses: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("count courses: %w", err))
 		return
 	}
 
@@ -114,19 +114,19 @@ func (h *Handler) getCourse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("get course %q: %w", slug, err))
+		httpx.DBError(w, r, fmt.Errorf("get course %q: %w", slug, err))
 		return
 	}
 
 	// Two queries total, no matter how many offerings the course has.
 	offerings, err := h.q.ListOfferingsByCourse(r.Context(), course.ID)
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("list offerings: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("list offerings: %w", err))
 		return
 	}
 	assessments, err := h.q.ListAssessmentsByCourse(r.Context(), course.ID)
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("list assessments: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("list assessments: %w", err))
 		return
 	}
 	httpx.OK(w, buildCourseDetail(course, offerings, assessments))
@@ -145,13 +145,13 @@ func (h *Handler) listMaterials(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "offering")
 		return
 	} else if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("get offering: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("get offering: %w", err))
 		return
 	}
 
 	materials, err := h.q.ListVisibleMaterialsByOffering(r.Context(), id)
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("list materials: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("list materials: %w", err))
 		return
 	}
 	items := make([]MaterialSummary, 0, len(materials))
@@ -176,17 +176,17 @@ func (h *Handler) getMaterial(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("get material: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("get material: %w", err))
 		return
 	}
 	where, err := h.q.GetMaterialContext(r.Context(), id)
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("get material context: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("get material context: %w", err))
 		return
 	}
 	files, err := h.q.ListMaterialFiles(r.Context(), id)
 	if err != nil {
-		httpx.Internal(w, r, fmt.Errorf("list material files: %w", err))
+		httpx.DBError(w, r, fmt.Errorf("list material files: %w", err))
 		return
 	}
 	httpx.OK(w, buildMaterialDetail(material, where, files))

@@ -17,14 +17,22 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/Nurasick/NUPP/api/internal/clientip"
 	"github.com/Nurasick/NUPP/api/internal/config"
 	"github.com/Nurasick/NUPP/api/internal/db"
+	"github.com/Nurasick/NUPP/api/internal/ratelimit"
 	"github.com/Nurasick/NUPP/api/internal/server"
 	"github.com/Nurasick/NUPP/api/internal/storage"
 )
 
-// shutdownTimeout is how long in-flight requests get to finish on SIGTERM.
-const shutdownTimeout = 10 * time.Second
+const (
+	// shutdownTimeout is how long in-flight requests get to finish on SIGTERM.
+	shutdownTimeout = 10 * time.Second
+
+	// Rate limiter memory bounds (hardening spec H-RL-4).
+	rateLimitMaxKeys   = 100_000
+	rateLimitIdleAfter = 60 * time.Second
+)
 
 func main() {
 	// JSON logs are easy for machines (log collectors, grep + jq) to parse.
@@ -48,27 +56,58 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	for _, w := range cfg.Warnings() {
+		logger.Warn(w)
+	}
 
 	// ctx is cancelled when the process receives Ctrl+C (SIGINT) or SIGTERM
 	// (what Docker sends on `docker stop`).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	// Migrations may legitimately run longer than the 5 s query limit of
+	// the serving pool, so they get their own short-lived, unlimited pool
+	// (hardening spec H-DB-1).
+	if err := migrate(ctx, cfg.DatabaseURL); err != nil {
+		return err
+	}
+	pool, err := db.ConnectServing(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	if err := db.Migrate(ctx, pool); err != nil {
-		return err
-	}
+
 	files, err := storage.NewLocal(cfg.StorageDir)
 	if err != nil {
 		return err
 	}
 
+	// Abuse protection (hardening spec §4–§6).
+	var limiter *ratelimit.Limiter
+	if cfg.RateLimit.Enabled {
+		limiter = ratelimit.New(ratelimit.Config{
+			API:       ratelimit.Limit{Rate: cfg.RateLimit.APIRate, Burst: cfg.RateLimit.APIBurst},
+			Files:     ratelimit.Limit{Rate: cfg.RateLimit.FilesRate, Burst: cfg.RateLimit.FilesBurst},
+			MaxKeys:   rateLimitMaxKeys,
+			IdleAfter: rateLimitIdleAfter,
+			Logger:    logger,
+		})
+		go limiter.Run(ctx) // periodic cleanup; stops when ctx is cancelled
+	}
+
 	// Timeouts and size limits live in server.NewHTTPServer (spec H-HTTP-1).
-	srv := server.NewHTTPServer(cfg.HTTPAddr, server.New(server.Deps{Pool: pool, Files: files, Logger: logger}))
+	srv := server.NewHTTPServer(cfg.HTTPAddr, server.New(server.Deps{
+		Pool:     pool,
+		Files:    files,
+		Logger:   logger,
+		ClientIP: clientip.NewResolver(cfg.TrustedProxies),
+		Limiter:  limiter,
+		Caps: server.Caps{
+			API:            cfg.MaxInflightAPI,
+			Files:          cfg.MaxInflightFiles,
+			FilesPerClient: cfg.MaxInflightFilesPerClient,
+		},
+	}))
 
 	// ListenAndServe blocks, so it runs in its own goroutine; its result
 	// comes back over a channel. Buffer size 1 means the goroutine can
@@ -95,4 +134,14 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("stopped cleanly")
 	return nil
+}
+
+// migrate applies migrations using a temporary pool without query limits.
+func migrate(ctx context.Context, url string) error {
+	pool, err := db.Connect(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	return db.Migrate(ctx, pool)
 }

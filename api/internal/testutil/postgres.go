@@ -18,6 +18,13 @@ import (
 	"github.com/Nurasick/NUPP/api/internal/db"
 )
 
+// databaseURL is the connection URL of the current package's test database.
+var databaseURL string
+
+// DatabaseURL returns the URL of the database started by RunWithDB, for
+// tests that need to open their own pool (e.g. with different settings).
+func DatabaseURL() string { return databaseURL }
+
 // RunWithDB starts a throwaway PostgreSQL container, applies migrations,
 // stores the connection pool in *pool and runs the package's tests.
 //
@@ -55,6 +62,7 @@ func RunWithDB(m *testing.M, pool **pgxpool.Pool) int {
 		log.Printf("postgres connection string: %v", err)
 		return 1
 	}
+	databaseURL = url
 	p, err := db.Connect(ctx, url)
 	if err != nil {
 		log.Printf("connect: %v", err)
