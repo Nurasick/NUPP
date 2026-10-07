@@ -1,0 +1,320 @@
+# Spec — Plan 1: Backend Foundation & Public Catalog API
+
+| | |
+|---|---|
+| **Status** | v2 — revised after independent review (2026-10-07); approved for implementation |
+| **Parent design** | [`docs/SYSTEM_DESIGN.md`](../../SYSTEM_DESIGN.md) |
+| **Implemented by** | [`plans/2026-10-07-plan-1-backend-foundation.md`](../plans/2026-10-07-plan-1-backend-foundation.md) — where plan code and this spec disagree, **this spec wins** |
+
+The key words **MUST**, **MUST NOT**, **SHOULD** and **MAY** are used as in RFC 2119.
+Every requirement has an ID (`R-…`) and every acceptance criterion an ID (`AC-…`).
+
+---
+
+## 1. Purpose
+
+Deliver the first runnable slice of NUPP: a Go HTTP service that lets anyone **browse
+approved learning materials**: find a course, see its offerings (year + term) and
+assessments (Midterm 1, Quiz 3 …), list materials, and download their files.
+
+This slice has **no users, no uploads and no moderation**. Data enters only through
+migrations, a dev seed command, or tests. The schema already contains the hooks later plans
+need (`hidden_at`, strict uniqueness, consistent foreign keys) so that they can build on it
+without breaking changes.
+
+## 2. Scope
+
+### In scope
+- Go module, configuration, PostgreSQL schema + migrations for the catalog.
+- Read-only JSON API for courses, offerings, assessments, materials.
+- File download endpoint for approved material files (local-disk storage).
+- Health check, request logging, panic recovery, security headers, graceful shutdown.
+- OpenAPI 3.0 contract and an automated conformance test.
+- Dev seed command, Docker image, Docker Compose, GitHub Actions CI.
+
+### Out of scope (later plans)
+- Authentication, users, sessions (Plan 3). Submissions and uploads (Plan 4).
+- Moderation, reports, setting `hidden_at`, cache purging (Plan 5).
+- Background jobs (Plan 6). Production deployment, TLS, backups, CDN rules (Plan 7).
+- Rate limiting (Cloudflare/Caddy in Plan 7; app-level limits arrive with writes in Plan 4).
+- CORS: web app and API share one origin, so no CORS headers are sent.
+
+---
+
+## 3. Domain Model
+
+### 3.1 Concepts
+
+| Concept | Meaning | Example |
+|---------|---------|---------|
+| **Course** | A subject, identified by its code | `CSCI 151 — Programming for Scientists and Engineers` |
+| **Offering** | One run of a course in a year and term, optionally by a specific instructor | `2025 · Fall · Prof. X` |
+| **Assessment** | A graded event within an offering | `Midterm 1`, `Quiz 3`, `Final` |
+| **Material** | One published item of an offering, optionally tied to one of that offering's assessments | "Midterm 1 solutions" |
+| **Material file** | One stored file of a material; a material has ≥ 1 files in page order | 6 JPEG photos of one exam |
+
+A material with no assessment is a *general* material (notes, slides, cheat sheets).
+A material is **visible** when `hidden_at IS NULL`.
+
+### 3.2 Database
+
+Requires **PostgreSQL ≥ 15** (uses `NULLS NOT DISTINCT` and column-list `ON DELETE SET NULL`);
+the project uses 17. All primary keys are `uuid`, defaulting to `gen_random_uuid()`.
+
+- R-DB-0: The database is initialised with the **builtin `C.UTF-8` locale provider**
+  (`initdb --locale-provider=builtin --builtin-locale=C.UTF-8`) so that case-insensitive
+  matching (`ILIKE`, `upper()`) works for Cyrillic/Kazakh identically on every OS and
+  image, and doesn't depend on glibc/musl versions.
+
+**courses**
+- R-DB-1: `code` text, 1–32 chars. Unique **case-insensitively**.
+- R-DB-2: `slug` text, unique, matches `^[a-z0-9]+(-[a-z0-9]+)*$`.
+- R-DB-3: `title` 1–200 chars. `department` optional, non-empty when present.
+- R-DB-4: `created_at` timestamptz, default now.
+
+**offerings**
+- R-DB-5: `course_id` → courses, cascade delete.
+- R-DB-6: `year` in [2000, 2100]; `term` ∈ {`spring`,`summer`,`fall`}; `instructor` optional, non-empty when present.
+- R-DB-7: `UNIQUE NULLS NOT DISTINCT (course_id, year, term, instructor)`.
+
+**assessments**
+- R-DB-8: `offering_id` → offerings, cascade delete.
+- R-DB-9: `kind` ∈ {`midterm`,`quiz`,`final`,`assignment`,`lab`,`other`}; `number` > 0 optional; `label` optional, non-empty when present.
+- R-DB-10: `UNIQUE NULLS NOT DISTINCT (offering_id, kind, number, label)`; also `UNIQUE (offering_id, id)` (target of the composite FK below).
+
+**materials**
+- R-DB-11: `offering_id` → offerings, cascade delete.
+- R-DB-12: `assessment_id` optional, enforced by `FOREIGN KEY (offering_id, assessment_id) REFERENCES assessments (offering_id, id) ON DELETE SET NULL (assessment_id)`, so a material's assessment **always belongs to the same offering**, and deleting the assessment turns the material into a general one.
+- R-DB-13: `title` 1–200 chars; `type` ∈ {`questions`,`solutions`,`notes`,`slides`,`cheatsheet`,`other`}; `description` text default `''`.
+- R-DB-14: `published_at` timestamptz default now; `hidden_at` timestamptz NULL (set by moderation in Plan 5).
+
+**material_files**
+- R-DB-15: `material_id` → materials, cascade delete. `id` is generated by the application before the row is written, because it is part of the storage key.
+- R-DB-16: `storage_key` unique, must start with `materials/`.
+- R-DB-17: `mime_type` ∈ {`application/pdf`, `image/png`, `image/jpeg`, `application/msword`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.openxmlformats-officedocument.presentationml.presentation`}.
+- R-DB-18: `size_bytes` > 0; `sha256` matches `^[0-9a-f]{64}$`; `position` ≥ 0; `(material_id, position)` unique.
+
+**Migrations**
+- R-DB-19: Plain SQL files embedded in the binary, applied in order on start. Re-applying is a no-op. Concurrent runs (server + seed) are serialised by a PostgreSQL advisory lock.
+- R-DB-20: Every migration has a working `Down`; a test migrates up → all the way down → up.
+
+---
+
+## 4. HTTP API — Common Rules
+
+### 4.1 Base and methods
+- R-API-1: Catalog endpoints live under `/api/v1`; health check at `/healthz`.
+- R-API-2: Only `GET` (and the automatic `HEAD` that Go's router provides for `GET` routes) is implemented.
+- R-API-3: Any other method on a path under `/api/` → **405** `method_not_allowed` with header `Allow: GET, HEAD`. A `GET` to an unknown path under `/api/` → **404** `not_found`. Both use the JSON envelope.
+
+### 4.2 Response envelope
+- R-API-4: Every JSON body is exactly `{"data": …, "error": …}` plus `"meta"` on paginated lists — no other top-level keys.
+- R-API-5: Success: `data` = payload, `error` = `null`. Failure: `data` = `null`, `error` = `{"code","message"}`.
+- R-API-6: `meta` = `{"total","limit","offset"}`, present **only** on paginated lists.
+- R-API-7: JSON responses use `Content-Type: application/json`.
+- R-API-8: Collections are always arrays — never `null` — at every nesting level.
+- R-API-9: Optional fields are always present; absent values are `null`.
+- R-API-10: Timestamps are RFC 3339 with timezone. UUIDs are lower-case canonical strings.
+
+### 4.3 Errors
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `bad_request` | Malformed path id, invalid query parameter |
+| 404 | `not_found` | Resource missing or hidden; unknown `GET /api/…` route |
+| 405 | `method_not_allowed` | Non-GET/HEAD under `/api/` |
+| 500 | `internal` | Unexpected failure (DB error, panic) |
+| 503 | `unavailable` | Health check can't reach the database |
+
+- R-API-11: `error.message` is English, safe for end users, and contains no SQL, stack traces, paths or internal identifiers.
+- R-API-12: Every 500 is logged with method, path and the wrapped error.
+- R-API-13: **Exceptions to the envelope**: successful file downloads (200/206/304) are raw bytes, and `416 Range Not Satisfiable` is the plain-text response produced by Go's `http.ServeContent`.
+
+### 4.4 Pagination
+- R-API-14: `limit`: default 20. Integer > 100 → clamped to 100. Integer < 1, non-integer, or a number too large to parse as an integer → 400.
+- R-API-15: `offset`: default 0. Integer outside [0, 100 000] or non-integer → 400.
+- R-API-16: An empty value (`?limit=`) means "use the default". If a parameter is repeated, the first value is used.
+- R-API-17: `meta.limit` is the limit actually applied; `meta.total` counts all matches ignoring limit/offset.
+
+### 4.5 Identifiers
+- R-API-18: `{id}` path parameters must be **canonical lower-case UUIDs** (36 chars, `8-4-4-4-12`). Any other form (upper-case, no hyphens, braces, `urn:uuid:`) → 400. This gives every resource exactly one URL, which matters for cache purging.
+- R-API-19: Well-formed UUID with no visible row → 404.
+
+### 4.6 Visibility
+- R-API-20: Hidden materials (`hidden_at IS NOT NULL`) are invisible on **every** public route: excluded from lists, 404 on detail, and 404 for each of their files.
+
+---
+
+## 5. Endpoints
+
+All lists have a final tiebreak on `id` so the order is fully deterministic.
+
+### 5.1 `GET /healthz`
+- R-EP-1: Pings the database with a 2-second timeout. OK → 200 `data = {"status":"ok"}`; failure → 503 `unavailable`.
+
+### 5.2 `GET /api/v1/courses` (paginated)
+
+| Query | Rules |
+|-------|-------|
+| `q` | Optional; trimmed; ≤ 100 Unicode characters after trimming, else 400; empty → all courses |
+| `limit`, `offset` | §4.4 |
+
+- R-EP-2: A course matches when `q` is a **case-insensitive substring** of `code` or `title`, including for Cyrillic/Kazakh text (`қазақ` finds `Қазақ тілі`).
+- R-EP-3: `q` is matched literally: `%`, `_` and `\` have no special meaning.
+- R-EP-4: Ordered by `code`, then `id`.
+- R-EP-5: `data` = array of **CourseSummary** `{id, code, slug, title, department|null}`.
+
+### 5.3 `GET /api/v1/courses/{slug}`
+- R-EP-6: Slug lookup is case-insensitive; unknown → 404.
+- R-EP-7: `data` = **CourseDetail** = CourseSummary + `offerings`: array of **OfferingView** `{id, year, term, instructor|null, assessments: [AssessmentView]}`; **AssessmentView** = `{id, kind, number|null, label|null}`.
+- R-EP-8: Offerings: `year` desc, term `fall`→`summer`→`spring`, instructor asc (null last), `id`.
+- R-EP-9: Assessments within an offering: kind `quiz`→`midterm`→`final`→`assignment`→`lab`→`other`, `number` asc (null last), `label` asc (null last), `id`.
+- R-EP-10: An offering is listed even if it has no visible materials (it's still a real run of the course).
+
+### 5.4 `GET /api/v1/offerings/{id}/materials`
+- R-EP-11: Unknown offering → 404; existing offering without visible materials → 200 `[]`.
+- R-EP-12: Not paginated.
+- R-EP-13: `data` = array of **MaterialSummary** `{id, offering_id, assessment_id|null, title, type, description, published_at}`.
+- R-EP-14: Order: general materials first; then by the assessment order of R-EP-9; then `type`, `title`, `id`.
+
+### 5.5 `GET /api/v1/materials/{id}`
+- R-EP-15: `data` = **MaterialDetail** = MaterialSummary + `course {id, code, slug, title}` + `offering {id, year, term, instructor|null}` + `assessment AssessmentView|null` + `files: [FileView]`. The context objects let the web page render "CSCI 151 · 2025 Fall · Midterm 1" without extra requests.
+- R-EP-16: **FileView** = `{id, mime_type, size_bytes, position, url}`; `url` = `/api/v1/files/{id}`; ordered by `position`.
+
+### 5.6 `GET /api/v1/files/{id}`
+- R-EP-17: Serves only files of **visible** materials, looked up through `material_files` (whose keys always start with `materials/`); never any other storage prefix.
+- R-EP-18: Headers on success:
+  - `Content-Type`: stored `mime_type` (one of the R-DB-17 allow-list).
+  - `X-Content-Type-Options: nosniff`.
+  - `Content-Security-Policy: default-src 'none'; sandbox`, so even a mislabelled file cannot run script on our origin.
+  - `Content-Disposition`: `inline` for `application/pdf`, `image/png`, `image/jpeg`; `attachment` for everything else. Filename: `<course-slug>-<title-slug>-p<position+1><ext>` (e.g. `csci-151-midterm-1-questions-p1.pdf`), built only from server-side values and ASCII-only; if the title slug is empty (non-Latin title), it is omitted.
+  - `ETag: "<sha256>"`, which enables `304 Not Modified` and `If-Range`.
+  - `Cache-Control: public, max-age=3600, s-maxage=86400` (no `immutable`: a file's bytes never change, but its visibility can).
+- R-EP-19: Single `Range` requests → 206. Unsatisfiable range → 416 (R-API-13).
+- R-EP-20: Row exists but stored object missing → 404 `not_found`, logged at **error** level with file id and key.
+- R-EP-21: Future obligations recorded here so they aren't lost: Plan 5's unpublish MUST purge the file URLs from Cloudflare; Plan 7 MUST add a Cloudflare Cache Rule for `/api/v1/files/*` that ignores query strings (Cloudflare does not cache extension-less URLs by default). The web app MUST render PDFs with fetch-based `react-pdf`, not `<iframe>`/`<object>`, because responses carry `X-Frame-Options: DENY`.
+
+---
+
+## 6. File Storage
+
+- R-ST-1: Accessed only through an interface `Put(key, reader)` / `Open(key) → seekable reader`, so local disk can be swapped for MinIO/R2/S3.
+- R-ST-2: Material file keys are `materials/<material_id>/<file_id><ext>`. Keys are generated by the server, never taken from client input, and never reused for different content.
+- R-ST-3: The local implementation rejects with a distinguishable *invalid key* error any key that is empty, absolute, contains `..`, `.` or empty segments, or contains `\` or `:`, on every OS.
+- R-ST-4: `Put` is atomic (temp file + rename); writing an existing key replaces it.
+- R-ST-5: `Open` on a missing key returns a distinguishable *not found* error.
+- R-ST-6: The storage root is created on startup if missing.
+
+---
+
+## 7. Configuration
+
+Environment variables only; in development an optional `api/.env` is loaded and real environment variables win.
+
+| Variable | Required | Default |
+|----------|----------|---------|
+| `DATABASE_URL` | yes | — |
+| `HTTP_ADDR` | no | `:8080` |
+| `STORAGE_DIR` | no | `./data/files` |
+| `APP_ENV` | no | `development` |
+
+- R-CFG-1: Missing `DATABASE_URL` → exit non-zero with a clear message before listening.
+- R-CFG-2: No secrets in source, committed config, images or logs (throwaway test-container credentials excepted).
+
+---
+
+## 8. Operational Behaviour
+
+- R-OPS-1: Start order: config → DB connect (fail fast) → migrations → storage root → listen.
+- R-OPS-2: Structured JSON logs on stdout. Every request, **including one that panicked**, is logged exactly once with method, path (no query string), status and duration in ms.
+- R-OPS-3: A handler panic is recovered, logged with method, path and stack, and answered with 500 `internal`; subsequent requests are served normally.
+- R-OPS-4: Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`.
+- R-OPS-5: `ReadHeaderTimeout` 5 s, `IdleTimeout` 60 s, no overall write timeout (slow downloads must not be cut off).
+- R-OPS-6: On SIGINT/SIGTERM: stop accepting, wait ≤ 10 s for in-flight requests. Clean shutdown exits 0; if requests had to be cut off, exit 1 (an unclean stop should be visible to the supervisor).
+- R-OPS-7: Middleware must not hide optional `ResponseWriter` capabilities (e.g. `io.ReaderFrom`, which lets file downloads use `sendfile`).
+- R-OPS-8: Single stateless process; all state in PostgreSQL and storage.
+
+---
+
+## 9. API Contract
+
+- R-CON-1: `api/openapi/openapi.yaml` (OpenAPI 3.0.3) describes every endpoint, parameter, status code and JSON schema in §4–§5. `error.code` is an enum of the §4.3 codes. Top-level envelopes use `additionalProperties: false`. The `error` field of success envelopes only accepts `null`.
+- R-CON-2: An automated test sends real requests through the full server and validates every **JSON** response (success and error) against the spec, covering each documented endpoint and each documented error status that can be produced on demand. Non-JSON responses (R-API-13) and the undocumented-route 404/405 are exempt from schema validation and covered by their own tests.
+- R-CON-3: The Plan 2 frontend generates its TypeScript client from this file; changing a response shape requires changing the spec in the same commit.
+
+---
+
+## 10. Developer Experience & Delivery
+
+- R-DX-1: `docker compose up -d postgres` starts a local DB; `go run ./cmd/seed` seeds idempotent demo data.
+- R-DX-2: `go test ./...` runs everything against disposable PostgreSQL containers (Docker required); no test depends on a developer's DB.
+- R-DX-3: SQL in `.sql` files; sqlc-generated Go is committed; CI fails on drift.
+- R-DX-4: `docker compose up --build` runs Postgres + API; the API image is non-root and has no Go toolchain.
+- R-DX-5: CI runs `go vet`, tests with `-race`, the sqlc drift check, and a Docker build on pushes to `main` and on PRs.
+- R-DX-6: Code is written to be **read and learned from**: every package and exported identifier has a doc comment; non-obvious decisions (security, SQL behaviour, concurrency, Go idioms) carry a short *why* comment. Comments explain intent, not syntax.
+- R-DX-7: Errors are wrapped with context and never silently dropped.
+
+---
+
+## 11. Acceptance Criteria
+
+Automated unless marked *(manual)*.
+
+| ID | Criterion | Covers |
+|----|-----------|--------|
+| AC-1 | Migrations create all tables; re-running succeeds; up → down to 0 → up succeeds | R-DB-19/20 |
+| AC-2 | `csci 151` conflicts with existing `CSCI 151` | R-DB-1 |
+| AC-3 | Two offerings 2025 fall with no instructor for one course conflict; empty-string instructor is rejected | R-DB-6/7 |
+| AC-4 | A material whose assessment belongs to a different offering is rejected; deleting its assessment sets `assessment_id` to NULL | R-DB-12 |
+| AC-5 | A material file with `mime_type = 'text/html'` or a storage key outside `materials/` is rejected | R-DB-16/17 |
+| AC-6 | `q=csci` and `q=Programming` return CSCI 151, `meta.total = 1` | R-EP-2 |
+| AC-7 | `q=қазақ` finds a course titled `Қазақ тілі`; `q=%`, `_`, `\` return `[]` | R-EP-2/3 |
+| AC-8 | `limit=abc`, `-1`, `0`, `99999999999999999999`; `offset=-1`, `100001`; 101-char `q` → 400 `bad_request` | §4.4 |
+| AC-9 | `limit=1000` → `meta.limit = 100`; `limit=` → 20 | R-API-14/16 |
+| AC-10 | No courses → `"data":[]` | R-API-8 |
+| AC-11 | `/courses/CSCI-151` returns the course with nested offering and midterm; unknown slug → 404 | R-EP-6/7 |
+| AC-12 | Offerings come back 2025 fall, 2025 spring, 2024 fall | R-EP-8 |
+| AC-13 | Assessments come back quiz 1, quiz 2, midterm 1, final | R-EP-9 |
+| AC-14 | Offering without assessments → `"assessments":[]`; course without offerings → `"offerings":[]` | R-API-8 |
+| AC-15 | Materials list: general first, then by assessment order | R-EP-14 |
+| AC-16 | Malformed id → 400; non-canonical UUID (upper-case) → 400; unknown UUID → 404 (offerings, materials, files) | R-API-18/19 |
+| AC-17 | Offering with no visible materials → `[]` | R-EP-11 |
+| AC-18 | Material detail includes course, offering, assessment and files (ordered, with url) | R-EP-15/16 |
+| AC-19 | Hidden material: absent from list, 404 on detail, 404 on its file | R-API-20 |
+| AC-20 | File download: exact bytes; Content-Type, nosniff, CSP sandbox, `inline` filename `csci-151-midterm-1-questions-p1.pdf`, ETag, Cache-Control | R-EP-18 |
+| AC-21 | `If-None-Match` with the ETag → 304 | R-EP-18 |
+| AC-22 | `Range: bytes=0-3` → 206, 4 bytes | R-EP-19 |
+| AC-23 | File row whose object is missing → 404 | R-EP-20 |
+| AC-24 | Storage rejects `""`, `../evil`, `/abs/path`, `a/../../b`, `a\..\b`, `C:/windows`, `a//b`, `a/./b` for Put and Open | R-ST-3 |
+| AC-25 | Storage round-trips; second Put replaces; missing key → not found | R-ST-4/5 |
+| AC-26 | `/healthz` → 200 `{"status":"ok"}` | R-EP-1 |
+| AC-27 | `GET /api/v1/nope` → JSON 404; `POST /api/v1/courses` → JSON 405 with `Allow: GET, HEAD` | R-API-3 |
+| AC-28 | Responses carry the three security headers | R-OPS-4 |
+| AC-29 | A panicking handler → 500 JSON, the request is logged, and the next request succeeds | R-OPS-2/3 |
+| AC-30 | Logging middleware preserves `io.ReaderFrom` | R-OPS-7 |
+| AC-31 | Contract test passes for every JSON response listed in R-CON-2 | R-CON-2 |
+| AC-32 | Config: missing `DATABASE_URL` errors; defaults and overrides apply | R-CFG-1 |
+| AC-33 | *(manual)* `go run ./cmd/seed` twice; API serves the demo course; its PNG opens in a browser | R-DX-1 |
+| AC-34 | *(manual / CI)* `docker compose up --build` serves `/healthz`; CI is green | R-DX-4/5 |
+
+---
+
+## 12. Decisions & Trade-offs
+
+| Decision | Alternative | Why |
+|----------|-------------|-----|
+| Substring `ILIKE`, no index | Full-text / trigram index | Hundreds of courses; a scan takes microseconds |
+| Offset pagination | Cursor pagination | Small, browsed list |
+| `COUNT(*)` for `meta.total` | Omit total | UI can show "12 courses"; cheap at this size |
+| Text + `CHECK` for enums | PostgreSQL `ENUM` | Easy to extend; sqlc maps to `string` |
+| Files served by the Go API | Caddy serves the directory | One place enforces visibility; Cloudflare caches (via a Plan 7 cache rule) |
+| 1-hour browser / 1-day edge cache | `immutable`, 1 year | Takedowns must take effect within a day even if purge is forgotten |
+| `hidden_at` added now | Add in Plan 5 | Visibility filtering is part of every public query; adding it later risks a missed query |
+| Migrations on startup with advisory lock | Separate migrate step | Single instance; the lock makes server + seed safe |
+| Builtin `C.UTF-8` collation | OS locale (glibc/ICU) | Same Unicode case-folding on every machine; no collation drift on OS upgrades |
+
+## 13. Review Log
+
+v1 was reviewed by an independent architecture reviewer (verdict REVISE, 18 findings). All were
+accepted except that `NoError` uses "null or an object with no properties" instead of `enum: [null]`,
+which the validator handles inconsistently.

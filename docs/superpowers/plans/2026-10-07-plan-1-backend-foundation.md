@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go ≥ 1.24, PostgreSQL 17, pgx/v5, sqlc 1.29 (run via Docker), goose v3, testcontainers-go, kin-openapi, Docker Compose, GitHub Actions.
 
-**Spec:** `docs/SYSTEM_DESIGN.md`
+**Spec:** `docs/superpowers/specs/2026-10-07-plan-1-catalog-api-spec.md` (v2). Where the code below disagrees with the spec, the spec wins — see *Amendments* right below.
 
 ## Global Constraints
 
@@ -24,6 +24,19 @@
 - Tests that touch the database use testcontainers (**Docker must be running**). DB tests do not call `t.Parallel()`; each test starts with `testutil.Reset`.
 - Errors are wrapped with context: `fmt.Errorf("load course: %w", err)`.
 - Commits use conventional commit messages (`feat:`, `test:`, `chore:` …).
+
+## Amendments after spec review (v2) — apply on top of the task code below
+
+| Task | Change (spec ref) |
+|------|-------------------|
+| 1, 2, 10 | Postgres initialised with `POSTGRES_INITDB_ARGS="--locale-provider=builtin --builtin-locale=C.UTF-8"` in compose and test containers (R-DB-0). |
+| 2 | Schema: `NULLS NOT DISTINCT` uniques, non-empty CHECKs, `UNIQUE (offering_id, id)` on assessments, composite FK materials→assessments with `ON DELETE SET NULL (assessment_id)`, `materials.hidden_at`, mime allow-list CHECK, `sha256 ~ '^[0-9a-f]{64}$'`, `storage_key ~ '^materials/'` (R-DB-*). Migrations use goose's Postgres session locker; test up → down → up via an `export_test.go` hook. Schema tests for AC-2…AC-5. |
+| 3 | `CreateMaterialFile` takes an explicit `id`. All list queries end with `, id`. Public material queries filter `hidden_at IS NULL`; materials ordered via `LEFT JOIN assessments` by the assessment order. New `GetMaterialContext` (course + offering + assessment) and `GetVisibleMaterialFile` (joins material + course for visibility and the download filename). Fixture keys `materials/<material_id>/<file_id>.pdf`. |
+| 4 | `ParseUUID` accepts only canonical lower-case 36-char UUIDs (R-API-18). Error code constants incl. `method_not_allowed`. |
+| 6–7 | MaterialDetail adds `course`, `offering`, `assessment`. File response: CSP sandbox, inline/attachment by type, readable filename, `ETag` = sha256, `Cache-Control: public, max-age=3600, s-maxage=86400`. Tests for AC-13, AC-15, AC-16 (upper-case UUID), AC-19, AC-20, AC-21. |
+| 8 | Middleware order: `logRequests(recoverPanics(...))` so panics are logged once; panic log includes method; `statusRecorder` passes through `io.ReaderFrom`. `GET /api/` → 404, `/api/` (other methods) → 405 with `Allow`. Shutdown exits 1 if it times out. |
+| 9 | OpenAPI: `Error.code` enum; `NoError` = null or empty object; `additionalProperties: false` on envelopes; MaterialDetail context objects; files lists every allowed mime type plus 304/416/500. Contract test also covers offset errors and file 400/404. |
+| 10 | Seed uses `materials/<material_id>/<file_id>.png`. |
 
 ## Review Focus
 
