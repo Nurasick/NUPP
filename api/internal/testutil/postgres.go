@@ -10,6 +10,7 @@ import (
 	"context"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
@@ -38,19 +39,7 @@ func DatabaseURL() string { return databaseURL }
 func RunWithDB(m *testing.M, pool **pgxpool.Pool) int {
 	ctx := context.Background()
 
-	// These credentials belong to a disposable container that only lives for
-	// the duration of this test run; they are not secrets.
-	ctr, err := tcpostgres.Run(ctx, "postgres:17-alpine",
-		tcpostgres.WithDatabase("nupp_test"),
-		tcpostgres.WithUsername("nupp"),
-		tcpostgres.WithPassword("nupp"),
-		// Same Unicode-aware locale as docker-compose.yml (spec R-DB-0), so
-		// tests see exactly the case-folding behaviour production has.
-		testcontainers.WithEnv(map[string]string{
-			"POSTGRES_INITDB_ARGS": "--locale-provider=builtin --builtin-locale=C.UTF-8",
-		}),
-		tcpostgres.BasicWaitStrategies(),
-	)
+	ctr, err := startPostgres(ctx)
 	if err != nil {
 		log.Printf("start postgres container (is Docker running?): %v", err)
 		return 1
@@ -76,6 +65,46 @@ func RunWithDB(m *testing.M, pool **pgxpool.Pool) int {
 
 	*pool = p
 	return m.Run()
+}
+
+// startPostgres starts the test container, retrying a few times.
+//
+// `go test ./...` runs packages in parallel, and each package starts its own
+// container. On Windows, Docker Desktop occasionally fails one of several
+// simultaneous connection attempts, and testcontainers then reports a
+// misleading error ("rootless Docker is not supported on Windows"). The
+// failure is transient, so a short retry makes the suite reliable without
+// hiding a real problem: if Docker is truly down, every attempt fails.
+func startPostgres(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
+	const attempts = 3
+	var lastErr error
+	for i := range attempts {
+		if i > 0 {
+			log.Printf("retrying postgres container start (attempt %d/%d) after: %v", i+1, attempts, lastErr)
+			time.Sleep(time.Duration(i) * 2 * time.Second)
+		}
+		// These credentials belong to a disposable container that only lives
+		// for the duration of this test run; they are not secrets.
+		ctr, err := tcpostgres.Run(ctx, "postgres:17-alpine",
+			tcpostgres.WithDatabase("nupp_test"),
+			tcpostgres.WithUsername("nupp"),
+			tcpostgres.WithPassword("nupp"),
+			// Same Unicode-aware locale as docker-compose.yml (spec R-DB-0),
+			// so tests see exactly the case folding production has.
+			testcontainers.WithEnv(map[string]string{
+				"POSTGRES_INITDB_ARGS": "--locale-provider=builtin --builtin-locale=C.UTF-8",
+			}),
+			tcpostgres.BasicWaitStrategies(),
+		)
+		if err == nil {
+			return ctr, nil
+		}
+		lastErr = err
+		if ctr != nil { // a half-started container must not be leaked
+			_ = testcontainers.TerminateContainer(ctr)
+		}
+	}
+	return nil, lastErr
 }
 
 // resetSQL truncates every table in the public schema except goose's own
