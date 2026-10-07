@@ -1,0 +1,28 @@
+# Local development stack. `docker compose up -d postgres` starts only the DB.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: nupp
+      POSTGRES_USER: nupp
+      # `:?` makes compose refuse to start if the variable is unset, so we never
+      # silently run with an empty or default password. Value comes from .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Builtin C.UTF-8 locale: Unicode-aware case-insensitive matching
+      # (Cyrillic/Kazakh) that behaves the same on every OS (spec R-DB-0).
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --builtin-locale=C.UTF-8
+    ports:
+      # Bind to localhost only: the DB must never be reachable from the network.
+      # Host port defaults to 5433 so it never clashes with a locally installed
+      # PostgreSQL on 5432.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nupp -d nupp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
