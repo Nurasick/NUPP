@@ -18,9 +18,9 @@ func TestParsePage(t *testing.T) {
 	}{
 		{"", httpx.Page{Limit: 20, Offset: 0}, false},
 		{"limit=5&offset=10", httpx.Page{Limit: 5, Offset: 10}, false},
-		{"limit=1000", httpx.Page{Limit: 100, Offset: 0}, false},       // clamped
-		{"limit=&offset=", httpx.Page{Limit: 20, Offset: 0}, false},    // empty = default
-		{"limit=7&limit=9", httpx.Page{Limit: 7, Offset: 0}, false},    // first value wins
+		{"limit=1000", httpx.Page{Limit: 100, Offset: 0}, false},        // clamped
+		{"limit=&offset=", httpx.Page{Limit: 20, Offset: 0}, false},     // empty = default
+		{"limit=7&limit=9", httpx.Page{Limit: 7, Offset: 0}, false},     // first value wins
 		{"offset=100000", httpx.Page{Limit: 20, Offset: 100000}, false}, // upper bound inclusive
 		{"limit=0", httpx.Page{}, true},
 		{"limit=-1", httpx.Page{}, true},

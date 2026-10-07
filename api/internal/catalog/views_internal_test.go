@@ -48,3 +48,22 @@ func TestBuildCourseDetail_EmptyCollectionsSerializeAsArrays(t *testing.T) {
 		t.Errorf("course without offerings must serialize [] not null: %s", raw)
 	}
 }
+
+// R-EP-18: download filenames are readable, ASCII-only, built from server data.
+func TestDownloadFilename(t *testing.T) {
+	cases := []struct {
+		slug, title string
+		position    int32
+		mime, want  string
+	}{
+		{"csci-151", "Midterm 1 questions", 0, "application/pdf", "csci-151-midterm-1-questions-p1.pdf"},
+		{"csci-151", "Scan", 4, "image/jpeg", "csci-151-scan-p5.jpg"},
+		{"kaz-101", "Қазақ тілі", 0, "image/png", "kaz-101-p1.png"}, // no ASCII title slug
+		{"csci-151", "Notes", 0, "application/x-unknown", "csci-151-notes-p1.bin"},
+	}
+	for _, c := range cases {
+		if got := downloadFilename(c.slug, c.title, c.position, c.mime); got != c.want {
+			t.Errorf("downloadFilename(%q, %q, %d, %q) = %q, want %q", c.slug, c.title, c.position, c.mime, got, c.want)
+		}
+	}
+}

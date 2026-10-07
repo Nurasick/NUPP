@@ -27,7 +27,7 @@ type envelope[T any] struct {
 // newMux returns a router with only the catalog routes, plus its storage.
 func newMux(t *testing.T) (*http.ServeMux, *storage.Local) {
 	t.Helper()
-	files, err := storage.NewLocal(t.TempDir())
+	files, err := storage.NewLocal(testutil.TempDir(t))
 	if err != nil {
 		t.Fatalf("storage: %v", err)
 	}

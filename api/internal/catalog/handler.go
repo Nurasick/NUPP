@@ -45,6 +45,9 @@ func NewHandler(pool *pgxpool.Pool, files storage.Storage) *Handler {
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/courses", h.listCourses)
 	mux.HandleFunc("GET /api/v1/courses/{slug}", h.getCourse)
+	mux.HandleFunc("GET /api/v1/offerings/{id}/materials", h.listMaterials)
+	mux.HandleFunc("GET /api/v1/materials/{id}", h.getMaterial)
+	mux.HandleFunc("GET /api/v1/files/{id}", h.getFile) // see files.go
 }
 
 // listCourses handles GET /api/v1/courses?q=&limit=&offset= (spec §5.2).
@@ -113,4 +116,64 @@ func (h *Handler) getCourse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, buildCourseDetail(course, offerings, assessments))
+}
+
+// listMaterials handles GET /api/v1/offerings/{id}/materials (spec §5.4).
+func (h *Handler) listMaterials(w http.ResponseWriter, r *http.Request) {
+	id, err := httpx.ParseUUID(r.PathValue("id"))
+	if err != nil {
+		httpx.BadRequest(w, "invalid offering id")
+		return
+	}
+	// Check the offering exists first so we can tell "unknown offering" (404)
+	// apart from "offering with no materials yet" (200 with []), R-EP-11.
+	if _, err := h.q.GetOffering(r.Context(), id); errors.Is(err, pgx.ErrNoRows) {
+		httpx.NotFound(w, "offering")
+		return
+	} else if err != nil {
+		httpx.Internal(w, r, fmt.Errorf("get offering: %w", err))
+		return
+	}
+
+	materials, err := h.q.ListVisibleMaterialsByOffering(r.Context(), id)
+	if err != nil {
+		httpx.Internal(w, r, fmt.Errorf("list materials: %w", err))
+		return
+	}
+	items := make([]MaterialSummary, 0, len(materials))
+	for _, m := range materials {
+		items = append(items, toMaterialSummary(m))
+	}
+	httpx.OK(w, items)
+}
+
+// getMaterial handles GET /api/v1/materials/{id} (spec §5.5).
+func (h *Handler) getMaterial(w http.ResponseWriter, r *http.Request) {
+	id, err := httpx.ParseUUID(r.PathValue("id"))
+	if err != nil {
+		httpx.BadRequest(w, "invalid material id")
+		return
+	}
+	// GetVisibleMaterial filters hidden materials, so a hidden one is
+	// indistinguishable from one that never existed (R-API-20).
+	material, err := h.q.GetVisibleMaterial(r.Context(), id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.NotFound(w, "material")
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, fmt.Errorf("get material: %w", err))
+		return
+	}
+	where, err := h.q.GetMaterialContext(r.Context(), id)
+	if err != nil {
+		httpx.Internal(w, r, fmt.Errorf("get material context: %w", err))
+		return
+	}
+	files, err := h.q.ListMaterialFiles(r.Context(), id)
+	if err != nil {
+		httpx.Internal(w, r, fmt.Errorf("list material files: %w", err))
+		return
+	}
+	httpx.OK(w, buildMaterialDetail(material, where, files))
 }
