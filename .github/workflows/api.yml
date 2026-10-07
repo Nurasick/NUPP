@@ -1,11 +1,19 @@
-# Continuous integration for the Go API (spec R-DX-5).
-# Runs on every push to main and on every pull request.
+# Continuous integration for the Go API (spec R-DX-5, hardening spec §13).
 name: api
 
 on:
   push:
     branches: [main]
   pull_request:
+  # Weekly run, so newly published vulnerabilities in our dependencies are
+  # reported even when nobody pushes code (H-CI-5). Mondays 06:00 UTC.
+  schedule:
+    - cron: "0 6 * * 1"
+
+# The workflow only needs to read the code. Granting nothing else means a
+# compromised step can't push commits or edit releases (H-CI-1).
+permissions:
+  contents: read
 
 # Default all `run:` steps to the api/ folder.
 defaults:
@@ -16,11 +24,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to a full commit SHA, not a tag: a tag
+      # can be moved to different code later, a SHA can't (H-CI-2).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: api/go.mod # same Go version as local development
+          # Newest 1.26.x patch release, like the floating golang:1.26 Docker
+          # tag, so CI tests what production builds with (H-CI-3).
+          go-version: "1.26.x"
+          check-latest: true
           cache-dependency-path: api/go.sum
 
       - name: Formatting (gofmt)
@@ -28,6 +41,16 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # Known vulnerabilities in Go or our dependencies that our code can
+      # actually reach. Any finding fails the build (H-DEP-3, H-CI-4).
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+      # Static security analysis. Generated sqlc code is excluded; reviewed
+      # findings are annotated in place with `#nosec` and a reason.
+      - name: gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 -quiet -exclude-generated ./...
 
       # testcontainers starts PostgreSQL in Docker, which GitHub's Ubuntu
       # runners provide out of the box. -race detects data races.
@@ -39,5 +62,7 @@ jobs:
       - name: sqlc output is up to date
         run: docker run --rm -v "$PWD:/src" -w /src sqlc/sqlc:1.29.0 diff
 
+      # --pull always fetches the newest golang:1.26-alpine, so the image
+      # gets Go's latest security patch release (H-DEP-4).
       - name: Docker image builds
-        run: docker build -t nupp-api .
+        run: docker build --pull -t nupp-api .

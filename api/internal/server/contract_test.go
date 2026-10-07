@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -14,6 +16,9 @@ import (
 	"github.com/getkin/kin-openapi/routers/gorillamux"
 
 	"github.com/Nurasick/NUPP/api/internal/catalog/catalogdb"
+	"github.com/Nurasick/NUPP/api/internal/ratelimit"
+	"github.com/Nurasick/NUPP/api/internal/server"
+	"github.com/Nurasick/NUPP/api/internal/storage"
 	"github.com/Nurasick/NUPP/api/internal/testutil"
 )
 
@@ -84,24 +89,54 @@ func TestAPIConformsToOpenAPISpec(t *testing.T) {
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
-			route, params, err := router.FindRoute(req)
-			if err != nil {
-				t.Fatalf("path is not described by the spec: %v", err)
-			}
-			input := &openapi3filter.ResponseValidationInput{
-				RequestValidationInput: &openapi3filter.RequestValidationInput{
-					Request: req, PathParams: params, Route: route,
-				},
-				Status: rec.Code,
-				Header: rec.Header(),
-				Body:   io.NopCloser(bytes.NewReader(rec.Body.Bytes())),
-				// Without this, statuses missing from the spec would fall back
-				// to a "default" response instead of failing.
-				Options: &openapi3filter.Options{IncludeResponseStatus: true},
-			}
-			if err := openapi3filter.ValidateResponse(context.Background(), input); err != nil {
-				t.Errorf("status %d response violates the spec: %v\nbody: %s", rec.Code, err, rec.Body)
-			}
+			validateResponse(t, router, req, rec)
 		})
 	}
+}
+
+// validateResponse checks one recorded response against the spec.
+func validateResponse(t *testing.T, router routers.Router, req *http.Request, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	route, params, err := router.FindRoute(req)
+	if err != nil {
+		t.Fatalf("path is not described by the spec: %v", err)
+	}
+	input := &openapi3filter.ResponseValidationInput{
+		RequestValidationInput: &openapi3filter.RequestValidationInput{
+			Request: req, PathParams: params, Route: route,
+		},
+		Status: rec.Code,
+		Header: rec.Header(),
+		Body:   io.NopCloser(bytes.NewReader(rec.Body.Bytes())),
+		// Without this, statuses missing from the spec would fall back
+		// to a "default" response instead of failing.
+		Options: &openapi3filter.Options{IncludeResponseStatus: true},
+	}
+	if err := openapi3filter.ValidateResponse(context.Background(), input); err != nil {
+		t.Errorf("status %d response violates the spec: %v\nbody: %s", rec.Code, err, rec.Body)
+	}
+}
+
+// HAC-18: the 429 produced by the rate limiter is documented too.
+func TestAPIConformsToOpenAPISpec_RateLimited(t *testing.T) {
+	testutil.Reset(t, testPool)
+	files, err := storage.NewLocal(testutil.TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := ratelimit.Limit{Rate: 0.01, Burst: 1}
+	handler := server.New(server.Deps{
+		Pool: testPool, Files: files, Logger: slog.New(slog.DiscardHandler),
+		Limiter: ratelimit.New(ratelimit.Config{API: strict, Files: strict, MaxKeys: 10, IdleAfter: time.Minute}),
+	})
+	router := loadSpec(t)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/courses", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/courses", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	validateResponse(t, router, req, rec)
 }

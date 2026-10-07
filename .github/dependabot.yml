@@ -1,0 +1,23 @@
+# Dependabot opens pull requests when our dependencies have updates, so
+# security fixes don't depend on someone remembering to check (H-CI-6).
+# Each PR still has to pass CI before it can be merged.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /api
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for all minor/patch Go module updates instead of a dozen.
+      go-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /api
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

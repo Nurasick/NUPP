@@ -70,6 +70,13 @@ func (l *Local) Put(_ context.Context, key string, r io.Reader) error {
 		_ = tmp.Close() // the copy error is the one worth reporting
 		return fmt.Errorf("write object: %w", err)
 	}
+	// Sync forces the bytes from the OS cache onto the disk. Without it, a
+	// power cut right after the rename could leave a correctly named but
+	// empty file on some filesystems (hardening spec H-ST-1).
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync object: %w", err)
+	}
 	// Close can report write errors that were buffered, so check it.
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)

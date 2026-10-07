@@ -14,6 +14,9 @@ info:
     Every JSON response is an envelope `{data, error}` (plus `meta` on paginated
     lists). Successful file downloads are raw bytes; `416` is plain text.
 
+    Requests are rate limited per client (`429`, with `Retry-After`). When the
+    server is at capacity or a query times out it answers `503` with `Retry-After`.
+
 paths:
   /healthz:
     get:
@@ -50,7 +53,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CourseListResponse" }
         "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/courses/{slug}:
     get:
@@ -69,7 +74,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CourseDetailResponse" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/offerings/{id}/materials:
     get:
@@ -85,7 +92,9 @@ paths:
               schema: { $ref: "#/components/schemas/MaterialListResponse" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/materials/{id}:
     get:
@@ -101,7 +110,9 @@ paths:
               schema: { $ref: "#/components/schemas/MaterialDetailResponse" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /api/v1/files/{id}:
     get:
@@ -134,7 +145,9 @@ paths:
           description: Range not satisfiable (plain text, produced by Go's http.ServeContent).
           content:
             text/plain: { schema: { type: string } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
 components:
   parameters:
@@ -145,9 +158,28 @@ components:
       description: Canonical lower-case UUID. Other spellings are rejected with 400.
       schema: { type: string, format: uuid }
 
+  headers:
+    RetryAfter:
+      description: Whole seconds to wait before retrying.
+      schema: { type: integer, minimum: 1 }
+
   responses:
     Error:
       description: Error envelope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    TooManyRequests:
+      description: "`rate_limited`: this client sent too many requests (or too many parallel downloads)."
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ServiceUnavailable:
+      description: "`overloaded` (server at capacity) or `timeout` (a query took too long). Retry shortly."
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -169,7 +201,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, not_found, method_not_allowed, internal, unavailable]
+          enum: [bad_request, not_found, method_not_allowed, internal, unavailable, rate_limited, overloaded, timeout]
         message: { type: string, description: "Human-readable, safe to show to users." }
 
     ErrorResponse:

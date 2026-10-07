@@ -20,7 +20,7 @@ Caddy · Docker Compose · self-hosted.
 
 ## Development
 
-Requirements: **Go 1.26+** and **Docker Desktop** (running).
+Requirements: **Go 1.26.6+** and **Docker Desktop** (running).
 
 ```bash
 cp .env.example .env              # set POSTGRES_PASSWORD (URL-safe characters)
@@ -54,6 +54,34 @@ docker run --rm -v "${PWD}:/src" -w /src sqlc/sqlc:1.29.0 generate
 **The API contract** is `api/openapi/openapi.yaml`. `go test` fails if any JSON response
 stops matching it, so change both together.
 
+### Configuration
+
+All settings are environment variables (see `api/.env.example`). Besides the basics
+(`DATABASE_URL`, `HTTP_ADDR`, `STORAGE_DIR`, `APP_ENV`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TRUSTED_PROXIES` | *(empty)* | CIDRs whose `X-Forwarded-For` is believed (set behind Caddy) |
+| `RATE_LIMIT_ENABLED` | `true` | Turn per-client rate limiting off for local load tests |
+| `RATE_LIMIT_API_RPS` / `_BURST` | `20` / `100` | JSON requests per second / burst, per client |
+| `RATE_LIMIT_FILES_RPS` / `_BURST` | `30` / `300` | File requests per second / burst, per client |
+| `MAX_INFLIGHT_API` / `MAX_INFLIGHT_FILES` | `32` / `64` | Concurrent requests before answering 503 |
+| `MAX_INFLIGHT_FILES_PER_CLIENT` | `8` | Concurrent downloads per client before 429 |
+| `DB_MAX_CONNS` | `10` | Serving connection pool size |
+
+### Security & limits
+
+What protects the API (details: [hardening spec](docs/superpowers/specs/2026-10-07-plan-1.5-hardening-spec.md)):
+
+- **Rate limiting** per client IP (IPv6 per /64): `429` + `Retry-After`.
+- **Concurrency caps**: `503 overloaded` instead of queueing; max 8 parallel downloads per client.
+- **Timeouts**: 5 s per SQL statement, 10 s per JSON request, header/read/write deadlines
+  against slow clients (downloads get `30 s + size ÷ 32 KiB/s`).
+- **Headers**: `nosniff`, `frame-ancestors 'none'` CSP (sandbox CSP on files), CORP `same-origin`,
+  `no-store` on every error.
+- **Containers**: read-only filesystem, no Linux capabilities, memory/CPU/PID limits, rotated logs.
+- **Supply chain**: CI runs `govulncheck` + `gosec` (and weekly), actions pinned by SHA, Dependabot.
+
 ### Code map
 
 | Path | What lives there |
@@ -64,7 +92,9 @@ stops matching it, so change both together.
 | `api/internal/catalog` | Public catalog: SQL queries, handlers, JSON views |
 | `api/internal/httpx` | JSON envelope, error codes, pagination |
 | `api/internal/storage` | File storage interface + local-disk implementation |
-| `api/internal/server` | Routing, middleware, health check |
+| `api/internal/server` | Routing, middleware (limits, deadlines, headers), health check |
+| `api/internal/clientip` | Real client IP behind trusted proxies |
+| `api/internal/ratelimit` | Per-client token buckets |
 | `api/internal/testutil` | Test helpers: throwaway Postgres, fixtures |
 
 ## Contributing materials

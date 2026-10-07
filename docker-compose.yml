@@ -1,6 +1,20 @@
 # Local stack.
 #   docker compose up -d postgres   → just the database (for `go run`)
 #   docker compose up -d --build    → database + API in containers
+#
+# Security/resilience settings follow the hardening spec
+# (docs/superpowers/specs/2026-10-07-plan-1.5-hardening-spec.md, §11 and §14).
+
+# Shared settings for container logs: Docker's "local" driver with rotation,
+# so a flood of requests can't fill the disk with logs (H-LOG-3). Each
+# service keeps at most 5 × 10 MB. (`x-` keys are ignored by Docker; the
+# `&logging` anchor lets services reuse this block with `*logging`.)
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -25,6 +39,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # The process may never gain privileges it didn't start with (H-CTR-2).
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    logging: *logging
 
   api:
     build: ./api
@@ -32,6 +50,13 @@ services:
       # Inside the compose network the DB is reachable by its service name.
       DATABASE_URL: postgres://nupp:${POSTGRES_PASSWORD}@postgres:5432/nupp?sslmode=disable
       APP_ENV: ${APP_ENV:-development}
+      # In production (behind Caddy) set TRUSTED_PROXIES=172.30.0.0/24 in .env,
+      # so the API believes X-Forwarded-For from containers on this network
+      # only (H-IP-5). Empty = trust nobody.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # Tell Go's garbage collector about the container's memory limit, so it
+      # collects harder before the kernel would kill the process (H-CTR-1).
+      GOMEMLIMIT: 200MiB
     ports:
       - "127.0.0.1:${API_PORT:-8080}:8080"
     volumes:
@@ -39,6 +64,28 @@ services:
     depends_on:
       postgres:
         condition: service_healthy # wait until pg_isready succeeds
+    healthcheck:
+      # The image has no shell or curl, so the server binary probes itself.
+      test: ["CMD", "/app/server", "-healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    # Container hardening (H-CTR-1):
+    read_only: true                       # root filesystem can't be modified; only the files volume is writable
+    cap_drop: [ALL]                       # no Linux capabilities: port 8080 needs none
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 512                       # Go may need a few hundred OS threads under heavy I/O
+    stop_grace_period: 20s                # > the server's 10 s graceful shutdown (H-OPS-1)
+    logging: *logging
+
+# A fixed subnet, so TRUSTED_PROXIES can name it (H-IP-5, H-CTR-3).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   pgdata:

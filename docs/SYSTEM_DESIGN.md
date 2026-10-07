@@ -233,6 +233,8 @@ sequenceDiagram
 | Unapproved content public | Separate tables (`submission_files` vs `material_files`) and storage prefixes; public file route only reads `material_files`. |
 | Disguised files | Allow-list by **sniffed** type, not extension; ZIP-based Office files verified by the worker; served with `nosniff` and fixed `Content-Type`. |
 | Path traversal | Storage keys generated server-side; storage layer rejects `..`, absolute, `\` and `:` keys. |
+| Request floods / slow clients | Per-IP token buckets (429), concurrency caps (503), DB statement timeouts, read/write deadlines; Cloudflare in front (Plan 7) |
+| Vulnerable dependencies | govulncheck + gosec in CI and weekly, Dependabot, SHA-pinned actions |
 | Upload abuse | `MaxBytesReader`, per-file and per-request limits, daily per-user quota, Caddy body limit, Cloudflare. |
 | Session theft / CSRF | Random 256-bit tokens, only SHA-256 stored; cookie `HttpOnly; Secure; SameSite=Lax`; mutating routes require matching `Origin`. |
 | Privilege escalation | Role loaded from DB per request; moderator routes behind middleware; every moderation action audited. |
@@ -260,6 +262,7 @@ Each plan ships working, tested software and is written when the previous one is
 
 | # | Plan | Delivers |
 |---|------|----------|
+| 1.5 | [Security & resilience hardening](superpowers/specs/2026-10-07-plan-1.5-hardening-spec.md) | Patched Go, rate limiting, concurrency caps, timeouts, headers, container + CI hardening |
 | 1 | [Backend foundation & catalog API](superpowers/plans/2026-10-07-plan-1-backend-foundation.md) | Go service, schema, read-only catalog API, file serving, OpenAPI contract test, Docker, CI |
 | 2 | Web: browsing UI | Next.js app: search, course page, material viewer (PDF/images) |
 | 3 | Auth | Google sign-in, sessions, roles, `/me` |
