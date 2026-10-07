@@ -103,3 +103,22 @@ func TestParseUUID(t *testing.T) {
 		}
 	}
 }
+
+// Hardening H-HDR-3: error responses must never be stored by any cache.
+func TestFail_IsNotCacheable(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError} {
+		rec := httptest.NewRecorder()
+		httpx.Fail(rec, status, httpx.CodeInternal, "x")
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("status %d: Cache-Control = %q, want no-store", status, got)
+		}
+	}
+}
+
+func TestOK_LeavesCachingToTheHandler(t *testing.T) {
+	rec := httptest.NewRecorder()
+	httpx.OK(rec, "x")
+	if got := rec.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("Cache-Control = %q, want unset", got)
+	}
+}

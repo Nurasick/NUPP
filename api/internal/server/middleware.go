@@ -14,14 +14,23 @@ import (
 	"github.com/Nurasick/NUPP/api/internal/httpx"
 )
 
-// withMiddleware wraps h in all middleware, outermost first:
+// withMiddleware wraps h in all middleware, outermost first (spec 1.5 §15):
 //
-//	logRequests → recoverPanics → securityHeaders → h
+//	withClientIP → logRequests → recoverPanics → securityHeaders → rateLimit → inflight → h
 //
-// logRequests is outermost so that even a request whose handler panicked is
-// logged exactly once, with the 500 that recoverPanics wrote (R-OPS-2).
-func withMiddleware(logger *slog.Logger, h http.Handler) http.Handler {
-	return logRequests(logger, recoverPanics(logger, securityHeaders(h)))
+//   - the client IP is known before anything logs or limits;
+//   - logging sits outside recovery so even a panicking request is logged
+//     exactly once, with the status the client actually got (R-OPS-2);
+//   - security headers are set before the limiters, so 429/503 carry them;
+//   - per-client rate limiting runs before the shared caps, so one flooding
+//     client is stopped by its own budget before it uses shared capacity.
+func withMiddleware(s stack, h http.Handler) http.Handler {
+	h = inflight(s.caps, h)
+	h = rateLimit(s.limiter, h)
+	h = securityHeaders(h)
+	h = recoverPanics(s.logger, h)
+	h = logRequests(s.logger, h)
+	return withClientIP(s.resolver, h)
 }
 
 // statusRecorder wraps a ResponseWriter to remember the status code and
@@ -84,6 +93,7 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 				// Path only: query strings may contain search text or, in
 				// later plans, tokens that don't belong in logs.
 				"path", r.URL.Path,
+				"client_ip", clientAddr(r).String(),
 				"status", rec.status,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"aborted", v != nil,
@@ -134,23 +144,34 @@ func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 			for _, name := range responseSpecificHeaders {
 				w.Header().Del(name)
 			}
+			w.Header().Set("Content-Security-Policy", defaultCSP) // H-HDR-1
 			httpx.Fail(w, http.StatusInternalServerError, httpx.CodeInternal, "something went wrong")
 		}()
 		next.ServeHTTP(rec, r)
 	})
 }
 
-// securityHeaders sets headers that harden every response (R-OPS-4):
+// defaultCSP forbids loading or framing anything. API responses are data,
+// never pages, so they need no permissions at all (H-HDR-1). File responses
+// override it with their own stricter sandbox policy.
+const defaultCSP = "default-src 'none'; frame-ancestors 'none'"
+
+// securityHeaders sets headers that harden every response (R-OPS-4, H-HDR):
 //   - nosniff: browsers must trust our Content-Type instead of guessing
 //   - X-Frame-Options DENY: no other site can embed our pages in a frame
 //     (prevents clickjacking)
 //   - Referrer-Policy: other sites see only our origin, not full URLs
+//   - CSP: see defaultCSP
+//   - CORP same-origin: other websites can't embed our files or JSON
+//     (stops hotlinking and cross-site data leaks); our own pages can
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Content-Security-Policy", defaultCSP)
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
 }

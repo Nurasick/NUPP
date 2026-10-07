@@ -31,6 +31,9 @@ const (
 	CodeMethodNotAllowed = "method_not_allowed"
 	CodeInternal         = "internal"
 	CodeUnavailable      = "unavailable"
+	CodeRateLimited      = "rate_limited" // 429: this client is sending too fast
+	CodeOverloaded       = "overloaded"   // 503: the server is at capacity
+	CodeTimeout          = "timeout"      // 503: a dependency (the DB) took too long
 )
 
 // Envelope is the shape of every JSON response body.
@@ -78,7 +81,11 @@ func List(w http.ResponseWriter, data any, meta Meta) {
 }
 
 // Fail writes an error response. message must be safe to show to end users.
+//
+// Errors are marked "no-store" so no cache (browser, Cloudflare) can keep a
+// 404 or 429 and keep serving it after the problem is gone (H-HDR-3).
 func Fail(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, status, Envelope{Error: &Error{Code: code, Message: message}})
 }
 

@@ -35,7 +35,7 @@ func TestPanicIsRecoveredLoggedOnceAndServerKeepsServing(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) { panic("boom") })
 	mux.HandleFunc("GET /fine", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	h := withMiddleware(logger, mux)
+	h := withMiddleware(stack{logger: logger}, mux)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boom?secret=1", nil))
@@ -88,7 +88,7 @@ func (r *readerFromRecorder) ReadFrom(src io.Reader) (int64, error) {
 // AC-30 / R-OPS-7
 func TestStatusRecorder_PreservesReaderFrom(t *testing.T) {
 	inner := &readerFromRecorder{ResponseRecorder: httptest.NewRecorder()}
-	h := withMiddleware(slog.New(slog.DiscardHandler), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := withMiddleware(stack{logger: slog.New(slog.DiscardHandler)}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// io.Copy prefers the source's WriteTo, then the destination's
 		// ReadFrom. Wrapping the reader in a bare struct hides strings.Reader's
 		// WriteTo, so ReadFrom is used if the middleware exposes it (an
@@ -110,7 +110,7 @@ func TestStatusRecorder_PreservesReaderFrom(t *testing.T) {
 // glued onto half a file), and the request must still be logged once.
 func TestPanicAfterResponseStartedAbortsAndIsLogged(t *testing.T) {
 	var buf bytes.Buffer
-	h := withMiddleware(slog.New(slog.NewJSONHandler(&buf, nil)), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := withMiddleware(stack{logger: slog.New(slog.NewJSONHandler(&buf, nil))}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("partial file"))
 		panic("disk read failed")
 	}))
@@ -148,7 +148,7 @@ func TestPanicAfterResponseStartedAbortsAndIsLogged(t *testing.T) {
 // Review fix: if a handler set file headers and then panicked before writing,
 // the 500 must not carry them (no caching an error as if it were the file).
 func TestPanicBeforeWriteDropsResponseSpecificHeaders(t *testing.T) {
-	h := withMiddleware(slog.New(slog.DiscardHandler), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := withMiddleware(stack{logger: slog.New(slog.DiscardHandler)}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hdr := w.Header()
 		hdr.Set("ETag", `"abc"`)
 		hdr.Set("Cache-Control", "public, max-age=3600")
@@ -162,10 +162,17 @@ func TestPanicBeforeWriteDropsResponseSpecificHeaders(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	for _, name := range []string{"ETag", "Cache-Control", "Content-Disposition", "Content-Security-Policy"} {
+	for _, name := range []string{"ETag", "Content-Disposition"} {
 		if v := rec.Header().Get(name); v != "" {
 			t.Errorf("500 response still carries %s: %q", name, v)
 		}
+	}
+	// The file's caching and sandbox CSP are replaced by the error defaults.
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; frame-ancestors 'none'" {
+		t.Errorf("CSP = %q, want the default API policy", got)
 	}
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Errorf("security headers must survive")

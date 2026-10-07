@@ -11,7 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Nurasick/NUPP/api/internal/catalog"
+	"github.com/Nurasick/NUPP/api/internal/clientip"
 	"github.com/Nurasick/NUPP/api/internal/httpx"
+	"github.com/Nurasick/NUPP/api/internal/ratelimit"
 	"github.com/Nurasick/NUPP/api/internal/storage"
 )
 
@@ -25,6 +27,12 @@ type Deps struct {
 	Pool   *pgxpool.Pool
 	Files  storage.Storage
 	Logger *slog.Logger
+
+	// Protection against abuse (hardening spec). All optional: nil / zero
+	// means "off", which keeps tests that don't care about limits simple.
+	ClientIP *clientip.Resolver
+	Limiter  *ratelimit.Limiter
+	Caps     Caps
 }
 
 // New returns the fully wired HTTP handler.
@@ -46,7 +54,12 @@ func New(d Deps) http.Handler {
 		httpx.Fail(w, http.StatusMethodNotAllowed, httpx.CodeMethodNotAllowed, "method not allowed")
 	})
 
-	return withMiddleware(d.Logger, mux)
+	return withMiddleware(stack{
+		logger:   d.Logger,
+		resolver: d.ClientIP,
+		limiter:  d.Limiter,
+		caps:     d.Caps,
+	}, mux)
 }
 
 // healthz reports whether the service can reach its database (R-EP-1).
