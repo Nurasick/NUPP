@@ -1,0 +1,4 @@
+# Store and check out text files with LF line endings on every OS, so that
+# generated code (sqlc), shell scripts and Dockerfiles are byte-identical on
+# Windows, macOS and Linux CI.
+* text=auto eol=lf
