@@ -2,7 +2,7 @@
 # into a tiny "distroless" image with no shell, package manager or compiler.
 # Smaller image, faster pulls, far less attack surface (spec R-DX-4).
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 # Copy go.mod/go.sum first and download modules in their own layer: Docker
 # caches it, so editing Go code doesn't re-download every dependency.
