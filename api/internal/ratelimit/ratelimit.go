@@ -27,6 +27,10 @@ const (
 	numClasses
 )
 
+// inlineSweepInterval is the minimum gap between sweeps triggered by a full
+// table (see Allow).
+const inlineSweepInterval = time.Second
+
 // Limit is one token bucket's settings.
 type Limit struct {
 	Rate  float64 // tokens added per second
@@ -53,11 +57,14 @@ type Limiter struct {
 	cfg    Config
 	limits [numClasses]Limit
 
-	// mu guards everything below. One mutex is plenty here: each Allow holds
-	// it for well under a microsecond.
+	// mu guards everything below. One mutex is plenty here: a normal Allow
+	// holds it for well under a microsecond. Only a sweep holds it longer
+	// (a few ms for 100 000 keys), which is why inline sweeps are throttled.
 	mu           sync.Mutex
 	entries      map[netip.Prefix]*entry
 	lastFullWarn time.Time
+	lastSweep    time.Time
+	sweeps       int // number of sweeps run (observed by tests)
 }
 
 // New creates a Limiter.
@@ -102,7 +109,12 @@ func (l *Limiter) Allow(class Class, addr netip.Addr) (ok bool, retryAfter time.
 
 	e := l.entries[key]
 	if e == nil {
-		if len(l.entries) >= l.cfg.MaxKeys {
+		// Table full: try to make room, but at most once per second. A
+		// sweep walks the whole map while holding the lock every request
+		// needs, so sweeping for each new client would let someone who
+		// floods us with new addresses stall all requests (review fix).
+		// The background Run sweep keeps cleaning up regardless.
+		if len(l.entries) >= l.cfg.MaxKeys && now.Sub(l.lastSweep) >= inlineSweepInterval {
 			l.sweepLocked(now)
 		}
 		if len(l.entries) >= l.cfg.MaxKeys {
@@ -145,6 +157,8 @@ func (l *Limiter) Sweep() {
 }
 
 func (l *Limiter) sweepLocked(now time.Time) {
+	l.sweeps++
+	l.lastSweep = now
 	for key, e := range l.entries {
 		if now.Sub(e.lastSeen) >= l.cfg.IdleAfter {
 			delete(l.entries, key) // deleting while ranging is allowed in Go

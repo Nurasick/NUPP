@@ -50,9 +50,12 @@ services:
       # Inside the compose network the DB is reachable by its service name.
       DATABASE_URL: postgres://nupp:${POSTGRES_PASSWORD}@postgres:5432/nupp?sslmode=disable
       APP_ENV: ${APP_ENV:-development}
-      # In production (behind Caddy) set TRUSTED_PROXIES=172.30.0.0/24 in .env,
-      # so the API believes X-Forwarded-For from containers on this network
-      # only (H-IP-5). Empty = trust nobody.
+      # Behind Caddy (production) set TRUSTED_PROXIES to the exact /32
+      # addresses of the proxy containers, e.g. 172.30.0.10/32,172.30.0.11/32
+      # (H-IP-5). NEVER trust the whole subnet: it contains the Docker
+      # gateway 172.30.0.1, the source of every connection that comes in
+      # through a published port, so anyone could then forge their IP.
+      # Empty = trust nobody (correct for local development).
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       # Tell Go's garbage collector about the container's memory limit, so it
       # collects harder before the kernel would kill the process (H-CTR-1).

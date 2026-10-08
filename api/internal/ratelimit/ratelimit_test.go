@@ -165,3 +165,27 @@ func TestAllow_FullTableLetsNewKeysThroughWithoutGrowing(t *testing.T) {
 		t.Fatal("after the sweep the stranger should be limited normally")
 	}
 }
+
+// Review fix: with the table full, a stream of new keys must not trigger a
+// full sweep on every request (each sweep walks the whole map under the one
+// lock every request needs). Inline sweeps run at most once per second.
+func TestAllow_FullTableSweepsAreThrottled(t *testing.T) {
+	c := &clock{t: time.Unix(1_000_000, 0)}
+	l := newLimiter(c, 2)
+	l.Allow(ratelimit.API, alice)
+	l.Allow(ratelimit.API, bob)
+	before := l.Sweeps()
+
+	for i := range 1000 {
+		l.Allow(ratelimit.API, netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)}))
+	}
+	if got := l.Sweeps() - before; got > 1 {
+		t.Fatalf("1000 new keys in the same second caused %d sweeps, want at most 1", got)
+	}
+
+	c.advance(time.Second)
+	l.Allow(ratelimit.API, netip.MustParseAddr("10.9.9.9"))
+	if got := l.Sweeps() - before; got != 2 {
+		t.Fatalf("after a second, sweeps = %d, want 2", got)
+	}
+}
